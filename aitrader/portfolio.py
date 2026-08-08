@@ -73,12 +73,16 @@ def execute_decisions(
     names: dict[str, str],
     risk: RiskConfig,
     trade_date: datetime,
+    fill_prices: dict[str, float] | None = None,
 ) -> tuple[AccountState, list[Trade], dict[str, str]]:
     """依次执行决策（含风控校验），返回 (新状态, 成交流水, 逐决策执行结果)。纯函数，可单测。
 
     - buy 经 validate_buy 校验与金额调整；被拒则跳过
     - sell 仅支持整仓卖出
     - execution_results 记录每条决策的去向（风控拒绝 / 价格缺失 / 实际成交），供评测归因
+    - fill_prices（可选）：实际成交价。缺省时成交价 == prices（决策参考价，默认当日收盘）。
+      回测 next_open 假设下：prices=T 收盘（现价/校验依据），fill_prices=T+1 开盘（成交价），
+      避免"乐观上界"——见 docs/PREDICTION_IMPROVEMENTS.md PP-1。
     """
     from .risk import validate_buy
 
@@ -95,12 +99,14 @@ def execute_decisions(
             execution_results[d.symbol] = "no_price"
             continue
         name = names[d.symbol]
+        # 成交价：fill_prices 优先（回测 next_open），否则用决策参考价（真实盘当日收盘）
+        exec_price = fill_prices.get(d.symbol, price) if fill_prices else price
 
         if d.action == "buy":
             adj = validate_buy(
                 state,
                 requested_amount=d.amount,
-                price=price,
+                price=exec_price,
                 risk=risk,
                 total_assets=state.total_assets,
                 already_bought_today=already_bought_today,
@@ -109,12 +115,12 @@ def execute_decisions(
             if not adj.allowed:
                 execution_results[d.symbol] = f"risk_rejected:{adj.reason}"
                 continue
-            trade = Trade(trade_date, d.symbol, name, "buy", price, adj.volume, adj.cost, d.reason)
+            trade = Trade(trade_date, d.symbol, name, "buy", exec_price, adj.volume, adj.cost, d.reason)
             state = apply_trade(state, trade)
             already_bought_today += adj.cost
             trades.append(trade)
             execution_results[d.symbol] = (
-                f"executed:buy {adj.volume}@{price}(请求{d.amount:,.0f}→实际{adj.cost:,.0f})"
+                f"executed:buy {adj.volume}@{exec_price}(请求{d.amount:,.0f}→实际{adj.cost:,.0f})"
             )
 
         elif d.action == "sell":
@@ -122,10 +128,10 @@ def execute_decisions(
             if pos is None:
                 execution_results[d.symbol] = "sell_no_position"
                 continue
-            proceeds = round(pos.volume * price * (1 - risk.commission_rate), 2)
-            trade = Trade(trade_date, d.symbol, name, "sell", price, pos.volume, proceeds, d.reason)
+            proceeds = round(pos.volume * exec_price * (1 - risk.commission_rate), 2)
+            trade = Trade(trade_date, d.symbol, name, "sell", exec_price, pos.volume, proceeds, d.reason)
             state = apply_trade(state, trade)
             trades.append(trade)
-            execution_results[d.symbol] = f"executed:sell {pos.volume}@{price}"
+            execution_results[d.symbol] = f"executed:sell {pos.volume}@{exec_price}"
 
     return state, trades, execution_results

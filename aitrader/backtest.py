@@ -146,8 +146,10 @@ def compute_metrics(
     )
 
 
-def compute_benchmark(bars: list[Bar], initial_capital: float) -> list[dict]:
-    """买入持有基准：以区间首日收盘价全额买入，逐日按收盘价折算资产。
+def compute_benchmark(
+    bars: list[Bar], initial_capital: float, commission_rate: float = 0.0
+) -> list[dict]:
+    """买入持有基准：以区间首日收盘价全额买入（扣单边买入佣金），逐日按收盘价折算资产。
 
     Returns:
         [{"date": "YYYY-MM-DD", "assets": float}, ...]
@@ -157,10 +159,11 @@ def compute_benchmark(bars: list[Bar], initial_capital: float) -> list[dict]:
     first_close = bars[0].close
     if first_close <= 0:
         return []
+    factor = 1.0 - commission_rate  # 买入一次成本（PP-1：基准与策略同口径）
     return [
         {
             "date": b.datetime.strftime("%Y-%m-%d"),
-            "assets": initial_capital * (b.close / first_close),
+            "assets": initial_capital * factor * (b.close / first_close),
         }
         for b in bars
     ]
@@ -183,6 +186,7 @@ class Backtester:
         start_date: datetime,
         end_date: datetime,
         record_decisions: bool = False,
+        fill_mode: str = "close",
     ) -> None:
         self.settings = settings
         self.db = db
@@ -192,6 +196,7 @@ class Backtester:
         self.start_date = start_date
         self.end_date = end_date
         self.record_decisions = record_decisions
+        self.fill_mode = fill_mode
 
     def run(self) -> dict:
         """逐日回放，返回 {account_id, snapshots, trades, metrics}"""
@@ -251,10 +256,14 @@ class Backtester:
             day = datetime.combine(d, datetime.min.time())
             # 只取截至当日的行情（配合 P0-1 修复，杜绝前视偏差）
             bars_map: dict[str, list[Bar]] = {}
+            fill_prices: dict[str, float] = {}
             for sym, bars in full.items():
                 idx = bisect.bisect_right(bar_dates[sym], d)
                 if idx:
                     bars_map[sym] = bars[max(0, idx - window):idx]
+                # PP-1 next_open 成交假设：下一根 K 线（下一可交易日）的开盘价作成交价
+                if self.fill_mode == "next_open" and idx < len(bars):
+                    fill_prices[sym] = bars[idx].open
 
             prices = {sym: bars[-1].close for sym, bars in bars_map.items()}
             state = refresh_prices(state, prices)
@@ -283,7 +292,13 @@ class Backtester:
                 )
 
             new_state, trades, _ = execute_decisions(
-                state, result.decisions, prices, names, self.settings.risk, day
+                state,
+                result.decisions,
+                prices,
+                names,
+                self.settings.risk,
+                day,
+                fill_prices=fill_prices or None,
             )
             for t in trades:
                 self.db.add_trade(account_id, t)

@@ -35,6 +35,8 @@ class DeepSeekEngine(DecisionEngine):
         include_policy: bool = False,
         name: str = "ai",
         response_cache: dict[str, str] | None = None,
+        temperature: float = 0.3,
+        system_prompt_extra: str = "",
     ) -> None:
         import requests  # 延迟导入，便于测试时替换
 
@@ -46,6 +48,8 @@ class DeepSeekEngine(DecisionEngine):
         self.lookback = lookback
         self.max_buy_count = max_buy_count
         self.include_policy = include_policy
+        self.temperature = temperature
+        self.system_prompt_extra = system_prompt_extra
         # 响应缓存：以 (model, prompt) 为键（prompt 已完整编码决策输入；
         # ai 与 ai_policy 提示词相同时共享缓存，避免回测重复计费）
         self._cache = response_cache
@@ -59,6 +63,19 @@ class DeepSeekEngine(DecisionEngine):
         return EngineResult(decisions=decisions, prompt=prompt, raw_output=raw_output)
 
     # ------------------------------------------------------------------
+    def _system_prompt(self) -> str:
+        """三段式 system：角色与目标 / 决策框架 / 输出契约（PP-3）。"""
+        base = (
+            "你是 AI Quant Arena 的量化决策助手，在虚拟资金上做客观评测。\n"
+            "目标：追求长期正期望，不是每次都对；信号不明确就 hold，宁缺毋滥。\n"
+            "决策框架：先看趋势与动量，再看波动率风险，最后决定是否动仓；"
+            "只对高置信信号买卖，不追高、不接飞刀、不用杠杆。\n"
+            "输出契约：只输出 JSON 决策；buy 必须给出明确理由。"
+        )
+        if self.system_prompt_extra:
+            return f"{base}\n{self.system_prompt_extra}"
+        return base
+
     def _build_prompt(self, ctx: DecisionContext) -> str:
         """把行情、持仓、现金整理成给模型的提示词"""
         lines: list[str] = [
@@ -100,7 +117,11 @@ class DeepSeekEngine(DecisionEngine):
         import hashlib
         from ..util import retry_call
 
-        key = hashlib.md5(f"{self.model}|{prompt}".encode("utf-8")).hexdigest()
+        system = self._system_prompt()
+        # 缓存键含 model/temperature/system/prompt：改 system 或温度不会误用旧缓存（PP-3）
+        key = hashlib.md5(
+            f"{self.model}|{self.temperature}|{system}|{prompt}".encode("utf-8")
+        ).hexdigest()
         if self._cache is not None and key in self._cache:
             return self._cache[key]
 
@@ -112,14 +133,11 @@ class DeepSeekEngine(DecisionEngine):
         payload = {
             "model": self.model,
             "messages": [
-                {
-                    "role": "system",
-                    "content": "你是一名谨慎的量化交易助手，风格保守，基于行情做波段。",
-                },
+                {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.3,
+            "temperature": self.temperature,
             "max_tokens": 800,
         }
         resp = retry_call(

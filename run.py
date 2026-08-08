@@ -94,6 +94,8 @@ def build_engines(settings, response_cache: dict | None = None) -> dict[str, Dec
             model=settings.model,
             lookback=settings.lookback_days,
             max_buy_count=settings.max_buy_count,
+            temperature=settings.temperature,
+            system_prompt_extra=settings.system_prompt_extra,
             response_cache=response_cache,
         )
         engines["ai_policy"] = DeepSeekEngine(
@@ -104,6 +106,8 @@ def build_engines(settings, response_cache: dict | None = None) -> dict[str, Dec
             include_policy=True,
             name="AI·政策版",
             max_buy_count=settings.max_buy_count,
+            temperature=settings.temperature,
+            system_prompt_extra=settings.system_prompt_extra,
             response_cache=response_cache,
         )
     return engines
@@ -170,6 +174,18 @@ def run_backtest(args, settings) -> int:
     from aitrader.datasource import AkShareDataSource
     from aitrader.reporter import build_backtest_report, plot_backtest_curves
 
+    # v0.5：覆盖成交假设 / 佣金倍率 / 采样温度 / 模型（供 A/B 实验，缓存键含这些 → 不误用旧缓存）
+    if args.fill:
+        settings.fill_mode = args.fill
+    if args.commission_mult:
+        settings.risk.commission_rate = round(
+            settings.risk.commission_rate * args.commission_mult, 6
+        )
+    if args.temperature is not None:
+        settings.temperature = args.temperature
+    if args.model:
+        settings.model = args.model
+
     # 明确请求 AI 引擎但未配置 key：直接报错，避免静默降级 rule 导致误读结果
     if args.engine in ("ai", "ai_policy") and not settings.api_key:
         print("[错误] 未配置 DEEPSEEK_API_KEY，无法回测 AI 引擎。请在 .env 配置 Key 后重试。")
@@ -220,6 +236,7 @@ def run_backtest(args, settings) -> int:
             start,
             end,
             record_decisions=args.record_decisions,
+            fill_mode=settings.fill_mode,
         )
         results[engine_type] = bt.run()
 
@@ -241,7 +258,9 @@ def run_backtest(args, settings) -> int:
     bench_bars = [
         b for b in all_bars if start.date() <= b.datetime.date() <= end.date()
     ]
-    benchmark = compute_benchmark(bench_bars, settings.initial_capital)
+    benchmark = compute_benchmark(
+        bench_bars, settings.initial_capital, commission_rate=settings.risk.commission_rate
+    )
 
     # 打印指标
     print(f"\n===== 回测结果 {start.date()} ~ {end.date()} =====")
@@ -293,6 +312,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", type=_date_type, help="回测结束日 YYYY-MM-DD，默认今天")
     parser.add_argument("--benchmark", default=None, help="基准标的代码（默认取配置第一个标的）")
     parser.add_argument("--record-decisions", action="store_true", help="回测同时落库决策留痕")
+    parser.add_argument(
+        "--fill",
+        choices=["close", "next_open"],
+        default=None,
+        help="回测成交假设：close 当日收盘（默认）| next_open 次日开盘（PP-1）",
+    )
+    parser.add_argument(
+        "--commission-mult",
+        type=float,
+        default=None,
+        help="回测佣金倍率（如 0.5/1/2），同口径校验结论稳定性（PP-1）",
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=None, help="覆盖 DeepSeek 采样温度（默认 0.3）"
+    )
+    parser.add_argument(
+        "--model", default=None, help="覆盖 DeepSeek 模型（如 deepseek-reasoner）"
+    )
     args = parser.parse_args(argv)
 
     setup_logging()
