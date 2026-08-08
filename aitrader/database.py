@@ -42,24 +42,26 @@ CREATE TABLE IF NOT EXISTS trades (
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS decisions (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id      INTEGER NOT NULL,
-    date            TEXT NOT NULL,
-    engine_type     TEXT NOT NULL,
-    symbol          TEXT NOT NULL,
-    action          TEXT NOT NULL,
-    amount          REAL,
-    reason          TEXT,
-    fallback        INTEGER DEFAULT 0,
-    validation      TEXT,
-    prompt_json     TEXT,
-    raw_output_json TEXT,
-    created_at      TEXT NOT NULL
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id       INTEGER NOT NULL,
+    date             TEXT NOT NULL,
+    engine_type      TEXT NOT NULL,
+    symbol           TEXT NOT NULL,
+    action           TEXT NOT NULL,
+    amount           REAL,
+    reason           TEXT,
+    fallback         INTEGER DEFAULT 0,
+    validation       TEXT,
+    execution_result TEXT,
+    prompt_json      TEXT,
+    raw_output_json  TEXT,
+    created_at       TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS daily_snapshots (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id   INTEGER NOT NULL,
     date         TEXT NOT NULL,
+    bar_date     TEXT,
     cash         REAL NOT NULL,
     total_assets REAL NOT NULL,
     pnl          REAL NOT NULL,
@@ -75,6 +77,13 @@ CREATE TABLE IF NOT EXISTS bars (
     close  REAL,
     volume REAL,
     UNIQUE(symbol, date)
+);
+CREATE TABLE IF NOT EXISTS batch_runs (
+    account_id INTEGER NOT NULL,
+    date       TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, date)
 );
 """
 
@@ -137,10 +146,15 @@ class Database:
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
-            # 迁移：旧库补齐 decisions.validation 列
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(decisions)").fetchall()}
-            if "validation" not in cols:
+            # 迁移：旧库补齐新增列
+            d_cols = {r[1] for r in conn.execute("PRAGMA table_info(decisions)").fetchall()}
+            if "validation" not in d_cols:
                 conn.execute("ALTER TABLE decisions ADD COLUMN validation TEXT")
+            if "execution_result" not in d_cols:
+                conn.execute("ALTER TABLE decisions ADD COLUMN execution_result TEXT")
+            s_cols = {r[1] for r in conn.execute("PRAGMA table_info(daily_snapshots)").fetchall()}
+            if "bar_date" not in s_cols:
+                conn.execute("ALTER TABLE daily_snapshots ADD COLUMN bar_date TEXT")
 
     # ---- accounts ----
     def create_account(self, name: str, engine_type: EngineType, initial_capital: float) -> int:
@@ -263,15 +277,17 @@ class Database:
         return [dict(r) for r in rows]
 
     # ---- snapshots ----
-    def add_snapshot(self, account_id: int, date: datetime, state: AccountState) -> None:
+    def add_snapshot(self, account_id: int, date: datetime, state: AccountState, bar_date: str = "") -> None:
         with self._connect() as conn:
             conn.execute(
-                """INSERT INTO daily_snapshots(account_id, date, cash, total_assets, pnl) VALUES(?,?,?,?,?)
+                """INSERT INTO daily_snapshots(account_id, date, bar_date, cash, total_assets, pnl) VALUES(?,?,?,?,?,?)
                    ON CONFLICT(account_id, date) DO UPDATE SET
-                     cash=excluded.cash, total_assets=excluded.total_assets, pnl=excluded.pnl""",
+                     bar_date=excluded.bar_date, cash=excluded.cash,
+                     total_assets=excluded.total_assets, pnl=excluded.pnl""",
                 (
                     account_id,
                     date.strftime(_DATE_FMT),
+                    bar_date or date.strftime(_DATE_FMT),
                     state.cash,
                     state.total_assets,
                     state.total_pnl,
@@ -315,6 +331,41 @@ class Database:
                 (account_id, date.strftime(_DATE_FMT)),
             ).fetchone()
         return dict(row) if row else None
+
+    # ---- batch_runs（防崩溃重跑重复成交的标记） ----
+    def begin_batch_run(self, account_id: int, date: datetime) -> None:
+        """标记该账户该日开始运行（崩溃后重跑据此跳过，避免重复成交）"""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO batch_runs(account_id, date, status, created_at) VALUES(?,?,?,?)",
+                (account_id, date.strftime(_DATE_FMT), "running", datetime.now().strftime(_DT_FMT)),
+            )
+
+    def complete_batch_run(self, account_id: int, date: datetime) -> None:
+        """标记该账户该日已完成"""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE batch_runs SET status='done' WHERE account_id=? AND date=?",
+                (account_id, date.strftime(_DATE_FMT)),
+            )
+
+    def has_batch_run(self, account_id: int, date: datetime) -> bool:
+        """该账户该日是否已有批处理标记（running 或 done）"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM batch_runs WHERE account_id=? AND date=?",
+                (account_id, date.strftime(_DATE_FMT)),
+            ).fetchone()
+        return row is not None
+
+    def update_decision_execution(self, account_id: int, date: datetime, symbol: str, result: str) -> None:
+        """回填决策的执行结果（风控拒绝 / 价格缺失 / 实际成交）"""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE decisions SET execution_result=? "
+                "WHERE account_id=? AND date=? AND symbol=? AND execution_result IS NULL",
+                (result, account_id, date.strftime(_DATE_FMT), symbol),
+            )
 
     # ---- bars ----
     def save_bars(self, bars: list[Bar]) -> None:

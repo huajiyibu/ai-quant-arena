@@ -73,22 +73,26 @@ def execute_decisions(
     names: dict[str, str],
     risk: RiskConfig,
     trade_date: datetime,
-) -> tuple[AccountState, list[Trade]]:
-    """依次执行决策（含风控校验），返回 (新状态, 成交流水)。纯函数，可单测。
+) -> tuple[AccountState, list[Trade], dict[str, str]]:
+    """依次执行决策（含风控校验），返回 (新状态, 成交流水, 逐决策执行结果)。纯函数，可单测。
 
     - buy 经 validate_buy 校验与金额调整；被拒则跳过
     - sell 仅支持整仓卖出
+    - execution_results 记录每条决策的去向（风控拒绝 / 价格缺失 / 实际成交），供评测归因
     """
     from .risk import validate_buy
 
     trades: list[Trade] = []
+    execution_results: dict[str, str] = {}
     already_bought_today: float = 0.0
 
     for d in decisions:
         if not d.valid:
+            execution_results[d.symbol] = "invalid"
             continue  # 语义校验未通过：跳过执行（已在决策表留痕）
         price = prices.get(d.symbol)
         if price is None or d.symbol not in names:
+            execution_results[d.symbol] = "no_price"
             continue
         name = names[d.symbol]
 
@@ -103,19 +107,25 @@ def execute_decisions(
                 already_holding=d.symbol in state.positions,
             )
             if not adj.allowed:
+                execution_results[d.symbol] = f"risk_rejected:{adj.reason}"
                 continue
             trade = Trade(trade_date, d.symbol, name, "buy", price, adj.volume, adj.cost, d.reason)
             state = apply_trade(state, trade)
             already_bought_today += adj.cost
             trades.append(trade)
+            execution_results[d.symbol] = (
+                f"executed:buy {adj.volume}@{price}(请求{d.amount:,.0f}→实际{adj.cost:,.0f})"
+            )
 
         elif d.action == "sell":
             pos = state.positions.get(d.symbol)
             if pos is None:
+                execution_results[d.symbol] = "sell_no_position"
                 continue
             proceeds = round(pos.volume * price * (1 - risk.commission_rate), 2)
             trade = Trade(trade_date, d.symbol, name, "sell", price, pos.volume, proceeds, d.reason)
             state = apply_trade(state, trade)
             trades.append(trade)
+            execution_results[d.symbol] = f"executed:sell {pos.volume}@{price}"
 
-    return state, trades
+    return state, trades, execution_results

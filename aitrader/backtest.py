@@ -282,7 +282,7 @@ class Backtester:
                     ]
                 )
 
-            new_state, trades = execute_decisions(
+            new_state, trades, _ = execute_decisions(
                 state, result.decisions, prices, names, self.settings.risk, day
             )
             for t in trades:

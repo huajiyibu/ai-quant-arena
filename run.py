@@ -156,6 +156,14 @@ def select_daily_engines(engine_arg: str, engines: dict) -> tuple[dict, list[str
     return engines, warnings
 
 
+def _date_type(s: str) -> datetime:
+    """argparse 日期类型校验：非法值给出友好错误"""
+    try:
+        return datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"日期格式应为 YYYY-MM-DD，收到: {s!r}")
+
+
 def run_backtest(args, settings) -> int:
     """walk-forward 回测：独立数据库逐日回放引擎，输出指标 + 基准对比报表"""
     from aitrader.backtest import Backtester, compute_benchmark
@@ -188,12 +196,8 @@ def run_backtest(args, settings) -> int:
         print("[提示] 未配置 DEEPSEEK_API_KEY，仅回测规则引擎。")
         engines = {"rule": RuleEngine()}
 
-    end = datetime.strptime(args.end, "%Y-%m-%d") if args.end else datetime.now()
-    start = (
-        datetime.strptime(args.start, "%Y-%m-%d")
-        if args.start
-        else end - timedelta(days=120)
-    )
+    end = args.end if args.end else datetime.now()
+    start = args.start if args.start else end - timedelta(days=120)
 
     # 提示 AI 回测预计调用次数（防误操作烧 API 额度；缓存命中不重复计费）
     ai_engines = [k for k in engines if k in ("ai", "ai_policy")]
@@ -219,22 +223,24 @@ def run_backtest(args, settings) -> int:
         )
         results[engine_type] = bt.run()
 
-    # 基准（买入持有）
+    # 基准（买入持有）；未知基准代码直接报错
     bench_symbol = args.benchmark or next(iter(settings.symbols))
-    bench_bars: list = []
     bench_cfg = settings.symbols.get(bench_symbol)
-    if bench_cfg:
-        span_days = (end - start).days
-        fetch_days = min(
-            max(int(span_days * 1.5) + settings.lookback_days + 20, settings.lookback_days + 20),
-            5000,
-        )
-        all_bars = ds.fetch_daily_bars(
-            bench_symbol, fetch_days, bench_cfg.exchange, end_date=end
-        )
-        bench_bars = [
-            b for b in all_bars if start.date() <= b.datetime.date() <= end.date()
-        ]
+    if bench_cfg is None:
+        print(f"[错误] 未知基准代码: {bench_symbol}，可选: {list(settings.symbols)}")
+        return 1
+    bench_bars: list = []
+    span_days = (end - start).days
+    fetch_days = min(
+        max(int(span_days * 1.5) + settings.lookback_days + 20, settings.lookback_days + 20),
+        5000,
+    )
+    all_bars = ds.fetch_daily_bars(
+        bench_symbol, fetch_days, bench_cfg.exchange, end_date=end
+    )
+    bench_bars = [
+        b for b in all_bars if start.date() <= b.datetime.date() <= end.date()
+    ]
     benchmark = compute_benchmark(bench_bars, settings.initial_capital)
 
     # 打印指标
@@ -278,13 +284,13 @@ def main(argv: list[str] | None = None) -> int:
     """CLI 入口：单实例锁 + 统一异常处理 + 写 last_run.json"""
     parser = argparse.ArgumentParser(description="AI 自动交易体验机")
     parser.add_argument("--engine", choices=["ai", "rule", "ai_policy", "both"], default="both")
-    parser.add_argument("--date", help="指定交易日 YYYY-MM-DD（默认今天）")
+    parser.add_argument("--date", type=_date_type, help="指定交易日 YYYY-MM-DD（默认今天）")
     parser.add_argument("--report-only", action="store_true", help="只出报表不交易")
     parser.add_argument("--force", action="store_true", help="强制重跑（跳过同日幂等检查）")
     parser.add_argument("--db", default=None, help="覆盖数据库路径")
     parser.add_argument("--backtest", action="store_true", help="walk-forward 回测模式（独立数据库）")
-    parser.add_argument("--start", help="回测起始日 YYYY-MM-DD（--backtest）")
-    parser.add_argument("--end", help="回测结束日 YYYY-MM-DD，默认今天")
+    parser.add_argument("--start", type=_date_type, help="回测起始日 YYYY-MM-DD（--backtest）")
+    parser.add_argument("--end", type=_date_type, help="回测结束日 YYYY-MM-DD，默认今天")
     parser.add_argument("--benchmark", default=None, help="基准标的代码（默认取配置第一个标的）")
     parser.add_argument("--record-decisions", action="store_true", help="回测同时落库决策留痕")
     args = parser.parse_args(argv)
@@ -341,7 +347,7 @@ def _run(args) -> int:
         print(f"[提示] {w}")
 
     # 跑批处理
-    date = datetime.strptime(args.date, "%Y-%m-%d") if args.date else datetime.now()
+    date = args.date if args.date else datetime.now()
     policy_source = AkSharePolicySource() if settings.policy.enabled else None
     runner = BatchRunner(settings, db, AkShareDataSource(), engines, policy_source=policy_source)
     results = runner.run(date, force=args.force)

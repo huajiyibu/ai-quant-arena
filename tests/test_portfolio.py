@@ -66,7 +66,7 @@ def test_execute_decisions_buy_and_sell_flow():
         Decision("510300", "buy", amount=30_000, reason="买"),
     ]
     names = {"510300": "沪深300ETF"}
-    new, trades = execute_decisions(
+    new, trades, _ = execute_decisions(
         state, decisions, {"510300": 4.0}, names, RISK, D
     )
     assert len(trades) == 1
@@ -75,7 +75,7 @@ def test_execute_decisions_buy_and_sell_flow():
 
     # 再跑一天：死叉卖出
     decisions2 = [Decision("510300", "sell", reason="卖")]
-    new2, trades2 = execute_decisions(
+    new2, trades2, _ = execute_decisions(
         new, decisions2, {"510300": 3.8}, names, RISK, D
     )
     assert len(trades2) == 1

@@ -48,12 +48,16 @@ class BatchRunner:
 
         # 0. 交易日判断：非交易日跳过批处理
         if not self.data_source.is_trading_day(date):
-            if getattr(self.data_source, "calendar_ok", True) is False:
-                logger.error(
-                    "交易日历加载失败，已降级为仅跳过周末；今天是周末之外，请人工核对是否交易日"
-                )
             logger.info("非交易日 %s，跳过批处理", date.strftime("%Y-%m-%d"))
             return {}
+
+        # 0.1 日历降级守卫：交易日历不可用时，工作日可能含节假日（清明/五一等），
+        #     akshare 会返回上一交易日旧 K 线易制造"节假日"假快照 → 保守跳过（--force 可强制）
+        if getattr(self.data_source, "calendar_ok", True) is False and not force:
+            logger.error(
+                "交易日历不可用（降级为仅跳周末），工作日可能含节假日，保守跳过交易；--force 可强制运行"
+            )
+            return {"_warning": "calendar_unavailable"}
 
         # 1. 拉宏观政策（仅当存在政策版引擎时；只跑 rule 时跳过，避免浪费与噪音）
         if any(getattr(e, "include_policy", False) for e in self.engines.values()):
@@ -67,13 +71,25 @@ class BatchRunner:
             logger.error("行情拉取失败: %s，当日跳过交易（避免静默坏数据）", failed)
             return {"_warning": f"bar_fetch_failed:{','.join(failed)}"}
 
-        # 2.1 数据新鲜度守卫：所有标的最新 K 线都严重陈旧（数据源滞后/断更）→ 当日跳过，
-        #     避免用旧价制造"当日"假快照（容忍 1~2 个自然日的 T+1 滞后）
+        # 2.1 数据新鲜度守卫：逐标的检查——严重陈旧的标的不参与当日成交/估值（剔除并告警）；
+        #     全部陈旧则当日跳过，避免用旧价制造"当日"假快照（容忍 1~2 个自然日的 T+1 滞后）
         STALE_DAYS = 5
-        latest_dates = [bars[-1].datetime.date() for bars in bars_map.values() if bars]
-        if latest_dates and all((date.date() - d).days > STALE_DAYS for d in latest_dates):
-            logger.error("行情数据陈旧（最新 %s），当日跳过交易", max(latest_dates))
-            return {"_warning": f"stale_bars:latest={max(latest_dates)}"}
+        fresh: dict[str, list] = {}
+        stale_symbols: list[str] = []
+        for sym, bars in bars_map.items():
+            if not bars:
+                continue
+            d = bars[-1].datetime.date()
+            if (date.date() - d).days > STALE_DAYS:
+                stale_symbols.append(sym)
+            else:
+                fresh[sym] = bars
+        if stale_symbols:
+            logger.error("以下标的数据陈旧已剔除（>%d 天）：%s", STALE_DAYS, stale_symbols)
+        if not fresh:
+            logger.error("全部标的数据陈旧，当日跳过交易")
+            return {"_warning": f"stale_bars:{','.join(stale_symbols)}"}
+        bars_map = fresh
 
         # 3. 各引擎独立运行
         results: dict[str, dict] = {}
@@ -136,8 +152,9 @@ class BatchRunner:
         else:
             account_id = account["id"]
 
-        # 幂等：该账户该日已有快照则跳过（定时任务 + 启动项兜底可能同日跑两次）
-        if not force and self.db.has_snapshot(account_id, date):
+        # 幂等：该账户该日已有快照或批处理标记则跳过（定时任务 + 启动项兜底可能同日跑两次；
+        #     崩溃后重跑也据此跳过，避免重复成交）
+        if not force and (self.db.has_snapshot(account_id, date) or self.db.has_batch_run(account_id, date)):
             snap = self.db.get_snapshot(account_id, date)
             logger.info(
                 "账户 %s 已于 %s 处理，本次跳过（--force 可强制重跑）",
@@ -148,8 +165,8 @@ class BatchRunner:
                 "account_id": account_id,
                 "trades": 0,
                 "skipped": True,
-                "total_assets": snap["total_assets"],
-                "pnl": snap["pnl"],
+                "total_assets": snap["total_assets"] if snap else self.settings.initial_capital,
+                "pnl": snap["pnl"] if snap else 0.0,
             }
 
         # 加载状态并刷新现价
@@ -191,17 +208,22 @@ class BatchRunner:
                 prompt=result.prompt, raw_output=result.raw_output,
             )
 
-        # 风控 + 执行 + 记账
+        # 风控 + 执行 + 记账（先标记"运行中"，崩溃后重跑不重复成交）
+        self.db.begin_batch_run(account_id, date)
         names = self.settings.symbol_names
-        new_state, trades = execute_decisions(
+        new_state, trades, exec_results = execute_decisions(
             state, result.decisions, prices, names, self.settings.risk, date
         )
         for trade in trades:
             self.db.add_trade(account_id, trade)
+        # 决策执行结果回填（风控拒绝 / 价格缺失 / 截断金额可统计）
+        for sym, res in exec_results.items():
+            self.db.update_decision_execution(account_id, date, sym, res)
 
-        # 保存状态 + 快照
+        # 保存状态 + 快照（记录 bar_date 供审计）
         self.db.save_state(account_id, new_state)
-        self.db.add_snapshot(account_id, date, new_state)
+        self.db.add_snapshot(account_id, date, new_state, bar_date=date.strftime("%Y-%m-%d"))
+        self.db.complete_batch_run(account_id, date)
 
         return {
             "account_id": account_id,
