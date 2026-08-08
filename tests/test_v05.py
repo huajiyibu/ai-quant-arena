@@ -43,8 +43,8 @@ class AlwaysBuyEngine:
 class OpenShiftDataSource(FakeDataSource):
     """open = close + 10，让 next_open 与 close 成交价明显可分"""
 
-    def fetch_daily_bars(self, symbol, days, exchange="SH", end_date=None):
-        bars = super().fetch_daily_bars(symbol, days, exchange, end_date)
+    def fetch_daily_bars(self, symbol, days, exchange="SH", end_date=None, adjust="none"):
+        bars = super().fetch_daily_bars(symbol, days, exchange, end_date, adjust)
         return [
             Bar(b.symbol, b.datetime, b.open + 10, b.high, b.low, b.close, b.volume)
             for b in bars

@@ -66,8 +66,10 @@ def compute_adjusted_bars(
 def fetch_dividends(symbol: str) -> list[tuple[date, float]]:
     """从新浪拉取 (日期, 每份累计分红) 列表（升序）。symbol 需带前缀，如 'sh510300'。
 
-    Raises: 网络/解析失败时向上抛（调用方捕获后降级为原始行情）。
+    进程内缓存（分红低频，同进程多次拉取去重）。失败向上抛，由调用方降级为原始行情。
     """
+    if symbol in _DIVIDEND_CACHE:
+        return _DIVIDEND_CACHE[symbol]
     from .util import retry_call
 
     import akshare as ak  # 延迟导入，便于 mock
@@ -76,5 +78,11 @@ def fetch_dividends(symbol: str) -> list[tuple[date, float]]:
         lambda: ak.fund_etf_dividend_sina(symbol=symbol), label=f"分红{symbol}"
     )
     if df is None or df.empty:
-        return []
-    return parse_dividends(list(zip(df["日期"], df["累计分红"])))
+        result: list[tuple[date, float]] = []
+    else:
+        result = parse_dividends(list(zip(df["日期"], df["累计分红"])))
+    _DIVIDEND_CACHE[symbol] = result
+    return result
+
+
+_DIVIDEND_CACHE: dict[str, list] = {}  # 进程内分红缓存（仿 datasource 交易日历模式）

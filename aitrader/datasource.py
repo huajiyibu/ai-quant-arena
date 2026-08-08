@@ -5,12 +5,35 @@
 from __future__ import annotations
 
 import logging
+import socket
 from datetime import datetime, time, timedelta
 from typing import Protocol
 
 from .models import Bar
 
 logger = logging.getLogger(__name__)
+
+# 网络硬超时（P1-9）：akshare 内部 requests.get 不传 timeout，网络半死/被代理干扰时
+# 会无限挂起（实测新浪 WinError 10060 需手动 Ctrl+C）。设 socket 级默认超时，快速失败。
+# 对显式传 timeout 的请求（如 DeepSeek 90s）无影响；上层 retry_call 再负责重试。
+socket.setdefaulttimeout(15)
+
+# IPv6 无路由修复：本机无 IPv6 路由，而 DNS 返回的新浪地址前几条全是 IPv6，
+# urllib3 逐条试 IPv6 失败后才轮到 IPv4 → 拉取从 0.5s 恶化到 60s（实测）。
+# 对国内行情域名过滤 IPv6，只留 IPv4（不影响 DeepSeek 等其他域名）。
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_first_getaddrinfo(host, *args, **kwargs):
+    result = _orig_getaddrinfo(host, *args, **kwargs)
+    if isinstance(host, str) and ("sina" in host or "sinajs" in host):
+        ipv4 = [r for r in result if r[0] == socket.AF_INET]
+        if ipv4:
+            return ipv4
+    return result
+
+
+socket.getaddrinfo = _ipv4_first_getaddrinfo
 
 
 class DataSource(Protocol):

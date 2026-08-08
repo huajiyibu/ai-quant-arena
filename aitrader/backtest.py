@@ -184,6 +184,41 @@ def rank_ic(confidences: list[float], forward_returns: list[float]) -> float:
     return cov / (var_x * var_y) ** 0.5
 
 
+def compute_forward_returns(
+    buys: list[tuple[datetime, str, float]],
+    full: dict[str, list[Bar]],
+    horizon_days: int = 20,
+) -> tuple[list[float], list[float]]:
+    """计算每笔 buy 的 forward return（决策日收盘 → 决策日后第 horizon 个交易日收盘）。
+
+    Returns: (confidences, forward_returns)；区间末尾不足 horizon 的样本跳过（无未来数据）。
+    仅用 full 内的历史/已发生数据，无前视。
+    """
+    import bisect
+
+    dates_by_sym: dict[str, list] = {}
+    close_by_sym: dict[str, dict] = {}
+    for sym, bars in full.items():
+        dates_by_sym[sym] = sorted(b.datetime.date() for b in bars)
+        close_by_sym[sym] = {b.datetime.date(): b.close for b in bars}
+    confs: list[float] = []
+    fwd: list[float] = []
+    for day, sym, conf in buys:
+        ds = dates_by_sym.get(sym, [])
+        idx = bisect.bisect_right(ds, day.date())  # 决策日之后第一个交易日
+        entry_pos = idx - 1  # 决策日（<= 当日最后一根）
+        exit_pos = idx + horizon_days - 1  # 决策日后第 horizon 个交易日
+        if entry_pos < 0 or exit_pos >= len(ds):
+            continue
+        entry_close = close_by_sym[sym].get(ds[entry_pos])
+        exit_close = close_by_sym[sym].get(ds[exit_pos])
+        if not entry_close or not exit_close or entry_close <= 0:
+            continue
+        confs.append(conf)
+        fwd.append(exit_close / entry_close - 1)
+    return confs, fwd
+
+
 def compute_benchmark(
     bars: list[Bar], initial_capital: float, commission_rate: float = 0.0
 ) -> list[dict]:
@@ -225,6 +260,7 @@ class Backtester:
         end_date: datetime,
         record_decisions: bool = False,
         fill_mode: str = "close",
+        adjust: str = "none",
     ) -> None:
         self.settings = settings
         self.db = db
@@ -235,6 +271,7 @@ class Backtester:
         self.end_date = end_date
         self.record_decisions = record_decisions
         self.fill_mode = fill_mode
+        self.adjust = adjust
 
     def run(self) -> dict:
         """逐日回放，返回 {account_id, snapshots, trades, metrics}"""
@@ -251,7 +288,7 @@ class Backtester:
         for symbol, cfg in self.settings.symbols.items():
             try:
                 full[symbol] = self.data_source.fetch_daily_bars(
-                    symbol, fetch_days, cfg.exchange, end_date=self.end_date
+                    symbol, fetch_days, cfg.exchange, end_date=self.end_date, adjust=self.adjust
                 )
             except Exception:
                 logger.exception("回测行情获取失败: %s", symbol)
@@ -290,6 +327,7 @@ class Backtester:
         }
 
         # 3. 逐日回放
+        buys: list[tuple[datetime, str, float]] = []  # PP-4：有效 buy 的 (决策日, 标的, confidence)
         for d in dates:
             day = datetime.combine(d, datetime.min.time())
             # 只取截至当日的行情（配合 P0-1 修复，杜绝前视偏差）
@@ -329,6 +367,11 @@ class Backtester:
                     ]
                 )
 
+            # PP-4：收集有效 buy 的置信度（供 Rank IC 校准评测；内存内，0 落库）
+            for dec in result.decisions:
+                if dec.action == "buy" and dec.valid and dec.symbol in names:
+                    buys.append((day, dec.symbol, dec.confidence))
+
             new_state, trades, _ = execute_decisions(
                 state,
                 result.decisions,
@@ -358,9 +401,11 @@ class Backtester:
         snapshots = self.db.get_snapshots(account_id)
         trades = self.db.get_trades(account_id)
         metrics = compute_metrics(snapshots, trades, self.settings.initial_capital)
+        conf, fwd = compute_forward_returns(buys, full)
         return {
             "account_id": account_id,
             "snapshots": snapshots,
             "trades": trades,
             "metrics": metrics,
+            "rank_ic": {"ic": rank_ic(conf, fwd), "n": len(fwd)},
         }

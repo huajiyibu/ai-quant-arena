@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
+from ..features import compute_features
 from ..models import Decision
 from .base import DecisionContext, DecisionEngine, EngineResult
 
@@ -37,6 +38,7 @@ class DeepSeekEngine(DecisionEngine):
         response_cache: dict[str, str] | None = None,
         temperature: float = 0.3,
         system_prompt_extra: str = "",
+        feature_inject: bool = False,
     ) -> None:
         import requests  # 延迟导入，便于测试时替换
 
@@ -50,6 +52,7 @@ class DeepSeekEngine(DecisionEngine):
         self.include_policy = include_policy
         self.temperature = temperature
         self.system_prompt_extra = system_prompt_extra
+        self.feature_inject = feature_inject
         # 响应缓存：以 (model, prompt) 为键（prompt 已完整编码决策输入；
         # ai 与 ai_policy 提示词相同时共享缓存，避免回测重复计费）
         self._cache = response_cache
@@ -76,6 +79,26 @@ class DeepSeekEngine(DecisionEngine):
             return f"{base}\n{self.system_prompt_extra}"
         return base
 
+    def _format_features(self, f: dict) -> str:
+        """把特征字典拼成一行提示词文本（PP-2）。字段缺失时优雅省略。"""
+        parts = []
+        for k, label in (("ma5", "ma5"), ("ma20", "ma20")):
+            if k in f:
+                parts.append(f"{label}={f[k]:.4g}")
+        if "ret_5d" in f:
+            parts.append(f"ret5={f['ret_5d']:+.2%}")
+        if "ret_20d" in f:
+            parts.append(f"ret20={f['ret_20d']:+.2%}")
+        if "vol_20d" in f:
+            parts.append(f"vol20={f['vol_20d']:.2%}")
+        if "rsi14" in f:
+            parts.append(f"rsi14={f['rsi14']:.0f}")
+        if "pct_from_high20" in f:
+            parts.append(f"距高={f['pct_from_high20']:+.2%}")
+        if "volume_ratio" in f:
+            parts.append(f"量比={f['volume_ratio']:.2f}")
+        return "  特征: " + " ".join(parts)
+
     def _build_prompt(self, ctx: DecisionContext) -> str:
         """把行情、持仓、现金整理成给模型的提示词"""
         lines: list[str] = [
@@ -85,6 +108,11 @@ class DeepSeekEngine(DecisionEngine):
             name = ctx.symbol_names.get(symbol, symbol)
             closes = " ".join(f"{b.close:.3f}" for b in bars[-self.lookback:])
             lines.append(f"{symbol}({name}): {closes}")
+            # PP-2：注入确定性技术特征（替代模型心算；需复权数据避免除权跳空失真）
+            if self.feature_inject:
+                f = compute_features(bars)
+                if f:
+                    lines.append(self._format_features(f))
 
         lines.append(f"可用现金: {ctx.account.cash:,.0f} 元")
         if ctx.account.positions:

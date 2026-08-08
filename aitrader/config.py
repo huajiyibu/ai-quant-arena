@@ -56,6 +56,7 @@ class Settings(BaseModel):
     temperature: float = Field(default=0.3, ge=0, le=2)
     system_prompt_extra: str = ""  # 追加到 DeepSeek system 的附加约束（PP-3）
     fill_mode: str = "close"  # 回测成交假设："close" 当日收盘 | "next_open" 次日开盘（PP-1）
+    feature_inject: bool = False  # 提示词注入技术特征（PP-2；建议配合 adjust=hfq 使用）
     initial_capital: float = Field(default=1_000_000, gt=0)
     lookback_days: int = Field(default=20, ge=5, le=120)
     max_buy_count: int = Field(default=2, ge=1, le=5)

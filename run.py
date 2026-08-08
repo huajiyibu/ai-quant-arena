@@ -96,6 +96,7 @@ def build_engines(settings, response_cache: dict | None = None) -> dict[str, Dec
             max_buy_count=settings.max_buy_count,
             temperature=settings.temperature,
             system_prompt_extra=settings.system_prompt_extra,
+            feature_inject=settings.feature_inject,
             response_cache=response_cache,
         )
         engines["ai_policy"] = DeepSeekEngine(
@@ -108,6 +109,7 @@ def build_engines(settings, response_cache: dict | None = None) -> dict[str, Dec
             max_buy_count=settings.max_buy_count,
             temperature=settings.temperature,
             system_prompt_extra=settings.system_prompt_extra,
+            feature_inject=settings.feature_inject,
             response_cache=response_cache,
         )
     return engines
@@ -187,6 +189,8 @@ def run_backtest(args, settings) -> int:
         settings.model = args.model
     if args.min_confidence is not None:
         settings.risk.min_confidence_buy = args.min_confidence
+    if args.feature_inject:
+        settings.feature_inject = True
 
     # 明确请求 AI 引擎但未配置 key：直接报错，避免静默降级 rule 导致误读结果
     if args.engine in ("ai", "ai_policy") and not settings.api_key:
@@ -239,6 +243,7 @@ def run_backtest(args, settings) -> int:
             end,
             record_decisions=args.record_decisions,
             fill_mode=settings.fill_mode,
+            adjust=args.adjust or "none",
         )
         results[engine_type] = bt.run()
 
@@ -255,7 +260,7 @@ def run_backtest(args, settings) -> int:
         5000,
     )
     all_bars = ds.fetch_daily_bars(
-        bench_symbol, fetch_days, bench_cfg.exchange, end_date=end
+        bench_symbol, fetch_days, bench_cfg.exchange, end_date=end, adjust=args.adjust or "none"
     )
     bench_bars = [
         b for b in all_bars if start.date() <= b.datetime.date() <= end.date()
@@ -277,6 +282,12 @@ def run_backtest(args, settings) -> int:
             f"胜率 {m.win_rate:.1%} | 盈亏比 {m.profit_factor:.2f} | "
             f"换手 {m.turnover:.2f} | 成交 {m.trade_count} 笔"
         )
+        ric = r.get("rank_ic") or {}
+        ric_n = ric.get("n", 0)
+        if ric_n >= 15:
+            print(f"  [{et}] Rank IC(20日): {ric['ic']:+.3f} (n={ric_n})")
+        elif ric_n:
+            print(f"  [{et}] Rank IC: 样本不足 n={ric_n}（<15 不显著）")
     if benchmark:
         bench_ret = benchmark[-1]["assets"] / settings.initial_capital - 1
         print(f"  基准({bench_symbol} 买入持有): {bench_ret:+.2%}")
@@ -337,6 +348,17 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help="买入最低置信度门槛（0~1，默认关闭；A/B 实验用，PP-4）",
+    )
+    parser.add_argument(
+        "--adjust",
+        choices=["none", "hfq"],
+        default=None,
+        help="回测行情复权：none 原始（默认）| hfq 后复权式（分红加回，PP-1/P1-2）",
+    )
+    parser.add_argument(
+        "--feature-inject",
+        action="store_true",
+        help="提示词注入技术特征（PP-2；建议配合 --adjust hfq）",
     )
     args = parser.parse_args(argv)
 
