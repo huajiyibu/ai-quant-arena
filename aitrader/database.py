@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     symbol           TEXT NOT NULL,
     action           TEXT NOT NULL,
     amount           REAL,
+    confidence       REAL,
     reason           TEXT,
     fallback         INTEGER DEFAULT 0,
     validation       TEXT,
@@ -152,6 +153,8 @@ class Database:
                 conn.execute("ALTER TABLE decisions ADD COLUMN validation TEXT")
             if "execution_result" not in d_cols:
                 conn.execute("ALTER TABLE decisions ADD COLUMN execution_result TEXT")
+            if "confidence" not in d_cols:
+                conn.execute("ALTER TABLE decisions ADD COLUMN confidence REAL")
             s_cols = {r[1] for r in conn.execute("PRAGMA table_info(daily_snapshots)").fetchall()}
             if "bar_date" not in s_cols:
                 conn.execute("ALTER TABLE daily_snapshots ADD COLUMN bar_date TEXT")
@@ -250,9 +253,9 @@ class Database:
     ) -> None:
         with self._connect() as conn:
             conn.execute(
-                """INSERT INTO decisions(account_id, date, engine_type, symbol, action, amount, reason, fallback,
-                                         validation, prompt_json, raw_output_json, created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO decisions(account_id, date, engine_type, symbol, action, amount, confidence, reason,
+                                         fallback, validation, prompt_json, raw_output_json, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     account_id,
                     date.strftime(_DATE_FMT),
@@ -260,6 +263,7 @@ class Database:
                     decision.symbol,
                     decision.action,
                     decision.amount,
+                    decision.confidence if decision.action == "buy" else None,
                     decision.reason,
                     1 if decision.fallback else 0,
                     decision.validation or None,

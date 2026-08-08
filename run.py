@@ -185,6 +185,8 @@ def run_backtest(args, settings) -> int:
         settings.temperature = args.temperature
     if args.model:
         settings.model = args.model
+    if args.min_confidence is not None:
+        settings.risk.min_confidence_buy = args.min_confidence
 
     # 明确请求 AI 引擎但未配置 key：直接报错，避免静默降级 rule 导致误读结果
     if args.engine in ("ai", "ai_policy") and not settings.api_key:
@@ -329,6 +331,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--model", default=None, help="覆盖 DeepSeek 模型（如 deepseek-reasoner）"
+    )
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=None,
+        help="买入最低置信度门槛（0~1，默认关闭；A/B 实验用，PP-4）",
     )
     args = parser.parse_args(argv)
 

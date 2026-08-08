@@ -91,9 +91,9 @@
 
 | # | 位置 | 问题（现状） | 建议 |
 |---|---|---|---|
-| P1-1 | `backtest.py::Backtester.run`／`portfolio.py::execute_decisions` | 收盘价成交偏乐观（15:30 决策按当日收盘价成交，实盘做不到） | 需拍板：次日开盘价成交 or 报表标注"乐观上界" |
-| P1-2 | `datasource.py::AkShareDataSource.fetch_daily_bars` | 行情未复权，分红除息跳空失真（**需调研**新浪/东财前复权参数） | 接入复权或 README 注明 |
-| P1-3 | `engines/deepseek.py::_build_prompt` | 提示词只喂 20 个收盘价，模型要心算均线/涨跌幅/波动率 | 注入 MA/RSI/波动率/距高低点等特征 |
+| P1-1 | `backtest.py::Backtester.run`／`portfolio.py::execute_decisions` | 收盘价成交偏乐观（15:30 决策按当日收盘价成交，实盘做不到） | ✅ v0.5 已落地：`--fill close|next_open`（`Settings.fill_mode` + `execute_decisions.fill_prices`） |
+| P1-2 | `datasource.py::AkShareDataSource.fetch_daily_bars` | 行情未复权，分红除息跳空失真（**需调研**新浪/东财前复权参数） | ✅ v0.6 数据层落地：akshare 无现成 ETF 前复权（东财不可达、新浪无 adjust），改用新浪 `fund_etf_dividend_sina` 后复权式调整 `adjfactor.py`（无前视），`adjust="hfq"` 可选（默认关） |
+| P1-3 | `engines/deepseek.py::_build_prompt` | 提示词只喂 20 个收盘价，模型要心算均线/涨跌幅/波动率 | ✅ v0.5 数据层落地 `aitrader/features.py`（MA/RSI/波动率/量比）；prompt 注入待复权接入后开启 |
 | P1-4 | `batch.py::_fetch_policy`（政策不落库）／`reporter.py` | 政策版无法归因、无法历史回测 | 新增 `policy_archive` 表存档 + 决策差异表 |
 | P1-5 | `risk.py::validate_buy`／`portfolio.py::execute_decisions` | 无止损/无回撤熔断/无移动止损 | 自小到大：单标的止损 → 回撤熔断 → 移动止损 |
 | P1-6 | `run.py::run_backtest` | AI 回测成本上限未做（已落地"预计调用次数提示"） | `--max-calls` 上限或抽样模式、缓存断点续跑 |
@@ -122,7 +122,7 @@
 
 **第三梯队（工程体验 / 存量推进）**
 6. P2-14~P2-16 逐项
-7. 存量 P1-1~P1-6、P2-1~P2-8、P2-12 按旧计划推进（P1-1/P1-2 需拍板与调研）
+7. 存量 P1-4~P1-6、P2-1~P2-8、P2-12 按旧计划推进（P1-1 成交假设 / P1-2 复权 / P1-3 特征 已由预测性能评审专项落地，见 PREDICTION_IMPROVEMENTS.md）
 
 ---
 

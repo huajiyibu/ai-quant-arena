@@ -32,6 +32,7 @@ class RiskConfig(BaseModel):
     max_position_pct: float = Field(default=0.3, gt=0, le=1)
     max_daily_buy_pct: float = Field(default=0.5, gt=0, le=1)
     commission_rate: float = Field(default=0.00025, ge=0, lt=0.01)
+    min_confidence_buy: float = Field(default=0.0, ge=0, le=1)  # 买入最低置信度（0=关闭，PP-4）
 
 
 class PolicyConfig(BaseModel):

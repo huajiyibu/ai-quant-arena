@@ -107,9 +107,12 @@ class DeepSeekEngine(DecisionEngine):
 
         lines.append(
             "请基于以上信息决定今日收盘后的操作，严格按如下 JSON 输出（只输出 JSON，不要解释）：\n"
-            '{"decisions":[{"symbol":"510300","action":"buy","amount":50000,"reason":"一句话理由"}]}\n'
+            '{"decisions":[{"symbol":"510300","action":"buy","amount":50000,'
+            '"confidence":0.7,"reason":"一句话理由"}]}\n'
             "规则: 1) action 仅限 buy/sell/hold; 2) buy 必带 amount(元), sell=清仓该标的; "
-            f"3) 最多对{self.max_buy_count}个标的下buy; 4) 谨慎、保守、不追高、不接飞刀。"
+            f"3) 最多对{self.max_buy_count}个标的下buy; "
+            "4) confidence 是 0~1 的数值，表示你对这个信号带来正收益的信心（不是市场必然性），"
+            "信号足够明确时才给高 confidence；5) 谨慎、保守、不追高、不接飞刀。"
         )
         return "\n".join(lines)
 
@@ -195,11 +198,16 @@ class DeepSeekEngine(DecisionEngine):
         action = str(item.get("action", "hold")).lower()
         if action not in ("buy", "sell", "hold"):
             action = "hold"
+        try:
+            confidence = self._to_float(item.get("confidence", 0.5))
+        except ValueError:
+            confidence = 0.5  # 缺失/非数字置信度 → 默认 0.5
         return Decision(
             symbol=str(item.get("symbol", "")).strip(),
             action=action,
             amount=self._to_float(item.get("amount", 0)),
             reason=str(item.get("reason", "")),
+            confidence=confidence,
         )
 
     @staticmethod
@@ -228,6 +236,10 @@ class DeepSeekEngine(DecisionEngine):
                 d.validation = "ok"
                 continue
             if d.action == "buy":
+                if not (0.0 <= d.confidence <= 1.0):
+                    d.valid = False
+                    d.validation = "invalid_confidence"
+                    continue
                 if d.amount <= 0:
                     d.valid = False
                     d.validation = "invalid_amount:<=0"

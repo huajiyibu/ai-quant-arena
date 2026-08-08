@@ -70,6 +70,7 @@ class Decision:
     action: Action
     amount: float = 0.0
     reason: str = ""
+    confidence: float = 0.5  # 模型对该信号带来正收益的信心（0~1，PP-4）
     fallback: bool = False
     valid: bool = True      # 语义校验是否通过（false 时不执行，仅留痕）
     validation: str = ""   # 校验结果："ok" 或具体原因

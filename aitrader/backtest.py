@@ -146,6 +146,44 @@ def compute_metrics(
     )
 
 
+def rank_ic(confidences: list[float], forward_returns: list[float]) -> float:
+    """Spearman 秩相关：模型 confidence 与后续实际收益的相关性（PP-4 评测工具）。
+
+    纯 Python 实现（无 scipy）。>0 说明 confidence 有预测信息量（校准度）。
+    两序列等长；任一为空 / 常数（秩无变异）时返回 0.0。
+    """
+    if not confidences or len(confidences) != len(forward_returns):
+        return 0.0
+    n = len(confidences)
+    if n < 2:
+        return 0.0
+
+    def _ranks(values: list[float]) -> list[float]:
+        order = sorted(range(n), key=lambda i: values[i])
+        ranks = [0.0] * n
+        i = 0
+        while i < n:
+            j = i
+            while j + 1 < n and values[order[j + 1]] == values[order[i]]:
+                j += 1
+            avg = (i + j) / 2 + 1  # 平均秩（处理并列）
+            for k in range(i, j + 1):
+                ranks[order[k]] = avg
+            i = j + 1
+        return ranks
+
+    rx = _ranks(confidences)
+    ry = _ranks(forward_returns)
+    mx = sum(rx) / n
+    my = sum(ry) / n
+    cov = sum((rx[i] - mx) * (ry[i] - my) for i in range(n))
+    var_x = sum((r - mx) ** 2 for r in rx)
+    var_y = sum((r - my) ** 2 for r in ry)
+    if var_x == 0 or var_y == 0:
+        return 0.0
+    return cov / (var_x * var_y) ** 0.5
+
+
 def compute_benchmark(
     bars: list[Bar], initial_capital: float, commission_rate: float = 0.0
 ) -> list[dict]:

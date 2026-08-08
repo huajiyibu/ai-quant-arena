@@ -4,10 +4,13 @@
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, time, timedelta
 from typing import Protocol
 
 from .models import Bar
+
+logger = logging.getLogger(__name__)
 
 
 class DataSource(Protocol):
@@ -34,7 +37,12 @@ class AkShareDataSource:
     _EXCHANGE_PREFIX: dict[str, str] = {"SH": "sh", "SZ": "sz"}
 
     def fetch_daily_bars(
-        self, symbol: str, days: int, exchange: str = "SH", end_date: datetime | None = None
+        self,
+        symbol: str,
+        days: int,
+        exchange: str = "SH",
+        end_date: datetime | None = None,
+        adjust: str = "none",
     ) -> list[Bar]:
         from .util import retry_call
 
@@ -67,6 +75,15 @@ class AkShareDataSource:
                     volume=float(row.volume),
                 )
             )
+        # 可选后复权式调整（消除除权跳空；拉取失败降级为原始行情）
+        if adjust == "hfq":
+            from .adjfactor import compute_adjusted_bars, fetch_dividends
+
+            try:
+                dividends = fetch_dividends(f"{prefix}{symbol}")
+                bars = compute_adjusted_bars(bars, dividends)
+            except Exception:
+                logger.warning("复权因子获取失败，返回原始行情: %s", symbol)
         return bars
 
     def is_trading_day(self, date: datetime) -> bool:
@@ -122,7 +139,12 @@ class FakeDataSource:
         self._trading_days = trading_days
 
     def fetch_daily_bars(
-        self, symbol: str, days: int, exchange: str = "SH", end_date: datetime | None = None
+        self,
+        symbol: str,
+        days: int,
+        exchange: str = "SH",
+        end_date: datetime | None = None,
+        adjust: str = "none",
     ) -> list[Bar]:
         # 语义与真实数据源对齐：返回截至 end_date 的最近 days 根（最后一根 = end_date，不含未来）
         start = self.base_date if end_date is None else end_date - timedelta(days=days - 1)

@@ -103,6 +103,12 @@ def execute_decisions(
         exec_price = fill_prices.get(d.symbol, price) if fill_prices else price
 
         if d.action == "buy":
+            # PP-4：模型自身信心不足的信号直接拒绝（min_confidence_buy=0 时关闭，向后兼容）
+            if d.confidence < risk.min_confidence_buy:
+                execution_results[d.symbol] = (
+                    f"risk_rejected:low_confidence:{d.confidence:.2f}"
+                )
+                continue
             adj = validate_buy(
                 state,
                 requested_amount=d.amount,

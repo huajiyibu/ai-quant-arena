@@ -42,7 +42,7 @@
 
 ### P1（中等成本，需实验设计）
 
-- [ ] **PP-4｜结构化置信度 + 最小置信度买入门槛（【高置信】）**
+- [x] **PP-4｜结构化置信度 + 最小置信度买入门槛（【高置信】）**（2026-08-09 已落地，见落地记录）
   - 现状：`models.py::Decision` 无 confidence 字段；`deepseek.py::_parse_item` 只解析 action/amount/reason；`risk.py::validate_buy` 只按金额/持仓截断，无"模型自身信心"维度；`_validate` 无置信度校验。
   - 问题：模型被要求"谨慎"却无量化不确定性的出口，所有 buy 金额趋同，无法区分"强烈信号 vs 勉强信号"；amount 被模型当"态度"用，风控截断后实际仓位与模型意图脱节（评测归因失真）。显式 confidence 让"该不该动、动多重"可被评测与校准。
   - 改法：① `Decision` 加 `confidence: float = 0.5`；`_parse_item` 解析 `confidence`（0~1，缺省 0.5，越界置 0.5 并标记）；`_validate` 校验范围；② `RiskConfig` 加 `min_confidence_buy: float = 0.0`（默认关闭，向后兼容）；③ `portfolio.py::execute_decisions` 对 `buy` 且 `confidence < min_confidence_buy` → 跳过并回填 `execution_result="risk_rejected:low_confidence"`（复用已落地 P1-8 回填）；④ 提示词措辞："confidence 是你对这个信号带来正收益的信心（0~1），不是市场确定性；只对 confidence≥0.6 的信号考虑买入。"
@@ -93,4 +93,6 @@
 - **PP-1（2026-08-09，落地，保留）**：`Settings.fill_mode`（close/next_open）；`execute_decisions` 新增可选 `fill_prices`（成交价与决策参考价分离，真实盘默认不变）；`Backtester` 回放预取下一根 bar 开盘价成交；`compute_benchmark` 支持佣金同口径；CLI `--fill` / `--commission-mult`。真实回测（rule 引擎，2025-06~2026-08，510300）：close +26.84% vs next_open +25.98% vs next_open+佣金×2 +25.64%，三口径方向一致（结论稳健），确认 close 假设乐观上界约 0.86pp。测试：`test_v05.py` 3 条 + `test_execute_decisions_default_fill_is_close`。
 - **PP-3（2026-08-09，落地，保留）**：system 三段式（目标/决策框架/输出契约，`_system_prompt`）；`Settings.temperature`/`system_prompt_extra` + CLI `--temperature`/`--model` 透传；**缓存键修正** `md5(model|temperature|system|prompt)`——修掉"改 system 误用旧缓存"隐患。注意：改 system 后 AI 缓存整体失效，下次 AI 引擎回测会重新计费一次（一次性成本，已确认可接受）。测试：`test_v05.py` 5 条（system 三段式/温度透传/缓存键隔离/ai 与 ai_policy 共享保持）。
 - **PP-2 数据层（2026-08-09，落地，保留）**：新增 `aitrader/features.py` 纯函数（ma5/10/20、ret_1d/5d/20d、vol_20d、rsi14、pct_from_high/low20、volume_ratio），各指标只依赖最近 N 根（局部性=无前视，有单测）。**prompt 注入未开启**：未复权数据下除权日特征跳变失真，待接入前复权（IMPROVEMENTS P1-2）后再注入。测试：`test_features.py` 4 条。
-- **PP-4~PP-8（已核验现状属实，排期）**：置信度门槛（PP-4）、止损网格（PP-5）、历史盈亏反馈（PP-6）、政策归档回测（PP-7）、标的池相关性分散（PP-8）——均未落地，按"地基先行"原则留待下一轮。
+- **PP-4（2026-08-09，落地，保留）**：`Decision.confidence`（默认 0.5）；`RiskConfig.min_confidence_buy`（默认 0 关闭，向后兼容）；DeepSeek `_parse_item` 解析 confidence（缺失/非数→0.5）、`_validate` 越界标记 `invalid_confidence`、提示词加入 confidence 语义；`execute_decisions` 对 `confidence < min_confidence_buy` 拒绝并回填 `risk_rejected:low_confidence`（复用 P1-8 回填）；`decisions` 表新增 `confidence` 列（migration，buy 才存）；`rank_ic` Spearman 秩相关评测函数（纯 Python）；CLI `--min-confidence`。测试：`test_v06.py` 11 条。下一步：用 `--min-confidence {0.5,0.6,0.7}` 跑真实 AI 回测 A/B + Rank IC 校准度报告。
+- **复权调研 + 数据层（2026-08-09，落地，保留）**：akshare 无现成 ETF 前复权接口（东财 `fund_etf_hist_em` 本机不可达、新浪 `fund_etf_hist_sina` 无 adjust 参数）；改用新浪 `fund_etf_dividend_sina`（日期+每份累计分红，510300 共 14 条）做**后复权式调整** `adjfactor.py`：`P_adj(t)=P(t)+截至t的累计分红`（只用截至当日信息→无前视；消除除权跳空）。`datasource.fetch_daily_bars` 增 `adjust="hfq"` 可选参数（默认关，失败降级原始行情）。真实验证：2025-06-18 除权日原始跳空 -0.085（误判下跌）→ 复权后连续无跳空。测试：`test_adjfactor.py` 4 条。**PP-2 前置复权已备**，特征注入可进入回测 A/B（下一步）。
+- **PP-5~PP-8（已核验现状属实，排期）**：止损网格（PP-5）、历史盈亏反馈（PP-6）、政策归档回测（PP-7）、标的池相关性分散（PP-8）——未落地，按"地基先行"原则留待下一轮。
