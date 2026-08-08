@@ -1,0 +1,19 @@
+# 密钥与本地配置（勿提交）
+.env
+config.json
+
+# 运行产物
+data/
+reports/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 遗留示例产物（ai_demo 根目录）
+portfolio.json
+trade_log.csv
+backtest_chart.html
+backtest_curve.png
