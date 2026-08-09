@@ -17,5 +17,5 @@ portfolio.json
 trade_log.csv
 backtest_chart.html
 backtest_curve.png
-ai_base.txt
-ai_feat*.txt
+ai_*.txt
+ai_*.txt
