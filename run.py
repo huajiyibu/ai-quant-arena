@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 # pythonw（无控制台）下 stdout/stderr 为 None，print/logging 会崩溃；
@@ -97,6 +97,7 @@ def build_engines(settings, response_cache: dict | None = None) -> dict[str, Dec
             temperature=settings.temperature,
             system_prompt_extra=settings.system_prompt_extra,
             feature_inject=settings.feature_inject,
+            market_env_inject=settings.market_env_inject,
             response_cache=response_cache,
         )
         engines["ai_policy"] = DeepSeekEngine(
@@ -110,6 +111,7 @@ def build_engines(settings, response_cache: dict | None = None) -> dict[str, Dec
             temperature=settings.temperature,
             system_prompt_extra=settings.system_prompt_extra,
             feature_inject=settings.feature_inject,
+            market_env_inject=settings.market_env_inject,
             response_cache=response_cache,
         )
     return engines
@@ -173,6 +175,19 @@ def _date_type(s: str) -> datetime:
     return d
 
 
+def _last_closed_trading_day() -> datetime:
+    """最近一个已收盘交易日：今天 15:30 前 → 今天未收盘，取上一个交易日（A-5）。"""
+    from aitrader.datasource import AkShareDataSource
+
+    ds = AkShareDataSource()
+    d = datetime.now()
+    if d.time() < time(15, 30):
+        d = d - timedelta(days=1)
+    while not ds.is_trading_day(d):
+        d = d - timedelta(days=1)
+    return datetime.combine(d.date(), datetime.min.time())
+
+
 def run_backtest(args, settings) -> int:
     """walk-forward 回测：独立数据库逐日回放引擎，输出指标 + 基准对比报表"""
     from aitrader.backtest import Backtester, compute_benchmark
@@ -192,8 +207,12 @@ def run_backtest(args, settings) -> int:
         settings.model = args.model
     if args.min_confidence is not None:
         settings.risk.min_confidence_buy = args.min_confidence
+    if args.slippage is not None:
+        settings.risk.slippage_bps = args.slippage
     if args.feature_inject:
         settings.feature_inject = True
+    if args.market_env:
+        settings.market_env_inject = True
 
     # 明确请求 AI 引擎但未配置 key：直接报错，避免静默降级 rule 导致误读结果
     if args.engine in ("ai", "ai_policy") and not settings.api_key:
@@ -221,7 +240,7 @@ def run_backtest(args, settings) -> int:
         print("[提示] 未配置 DEEPSEEK_API_KEY，仅回测规则引擎。")
         engines = {"rule": RuleEngine()}
 
-    end = args.end if args.end else datetime.now()
+    end = args.end if args.end else _last_closed_trading_day()
     start = args.start if args.start else end - timedelta(days=120)
 
     # 提示 AI 回测预计调用次数（防误操作烧 API 额度；缓存命中不重复计费）
@@ -246,7 +265,7 @@ def run_backtest(args, settings) -> int:
             end,
             record_decisions=args.record_decisions,
             fill_mode=settings.fill_mode,
-            adjust=args.adjust or "none",
+            adjust=args.adjust or settings.adjust,
         )
         results[engine_type] = bt.run()
 
@@ -263,7 +282,7 @@ def run_backtest(args, settings) -> int:
         5000,
     )
     all_bars = ds.fetch_daily_bars(
-        bench_symbol, fetch_days, bench_cfg.exchange, end_date=end, adjust=args.adjust or "none"
+        bench_symbol, fetch_days, bench_cfg.exchange, end_date=end, adjust=args.adjust or settings.adjust
     )
     bench_bars = [
         b for b in all_bars if start.date() <= b.datetime.date() <= end.date()
@@ -353,6 +372,12 @@ def main(argv: list[str] | None = None) -> int:
         help="买入最低置信度门槛（0~1，默认关闭；A/B 实验用，PP-4）",
     )
     parser.add_argument(
+        "--slippage",
+        type=float,
+        default=None,
+        help="滑点（bps，买卖双边；默认 0，A/B 用，P2-2）",
+    )
+    parser.add_argument(
         "--adjust",
         choices=["none", "hfq"],
         default=None,
@@ -362,6 +387,11 @@ def main(argv: list[str] | None = None) -> int:
         "--feature-inject",
         action="store_true",
         help="提示词注入技术特征（PP-2；建议配合 --adjust hfq）",
+    )
+    parser.add_argument(
+        "--market-env",
+        action="store_true",
+        help="提示词注入市场环境（B-3，探索性，默认关）",
     )
     args = parser.parse_args(argv)
 

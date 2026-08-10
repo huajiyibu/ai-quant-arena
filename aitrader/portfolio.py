@@ -101,6 +101,10 @@ def execute_decisions(
         name = names[d.symbol]
         # 成交价：fill_prices 优先（回测 next_open），否则用决策参考价（真实盘当日收盘）
         exec_price = fill_prices.get(d.symbol, price) if fill_prices else price
+        # P2-2 滑点：买价上浮 / 卖价下压（bps），模拟冲击成本
+        if risk.slippage_bps:
+            slip = 1 + risk.slippage_bps / 10000 * (1 if d.action == "buy" else -1)
+            exec_price = exec_price * slip
 
         if d.action == "buy":
             # PP-4：模型自身信心不足的信号直接拒绝（min_confidence_buy=0 时关闭，向后兼容）

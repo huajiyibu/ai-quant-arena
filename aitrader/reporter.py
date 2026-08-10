@@ -74,11 +74,15 @@ def build_summary(db: Database, settings: Settings) -> str:
 def build_daily_report(
     db: Database, settings: Settings, chart_path: Path, out_path: Path
 ) -> Path:
-    """生成小白友好的 HTML 日报：双击用浏览器打开即可看收益概况"""
+    """生成小白友好的 HTML 日报：收益概况 + 今日决策 + 基准对照 + AI 信心校准（B-1/B-2）"""
     import base64
     from datetime import datetime
 
+    from .backtest import rank_ic
+    from .datasource import AkShareDataSource
+
     cards: list[str] = []
+    data_until = ""
     for acc in db.get_accounts():
         snaps = db.get_snapshots(acc["id"])
         if not snaps:
@@ -87,22 +91,81 @@ def build_daily_report(
         pct = last["pnl"] / acc["initial_capital"] * 100
         state = db.load_state(acc["id"])
         if state and state.positions:
-            parts = [f"{p.name} {p.volume}股（成本{p.cost_price:.3f}）" for p in state.positions.values()]
+            parts = [
+                f"{p.name} {p.volume}股（成本{p.cost_price:.3f}）"
+                for p in state.positions.values()
+            ]
             holdings = "，".join(parts)
         else:
             holdings = "空仓"
         trades = db.get_trades(acc["id"])
         css = "green" if last["pnl"] >= 0 else "red"
+
+        # B-1：真实盘 Rank IC 校准（AI 引擎信心是否有预测力）
+        ic_line = ""
+        if acc["engine_type"] in ("ai", "ai_policy"):
+            cal = db.get_calibrated_decisions(acc["id"])
+            if len(cal) >= 5:
+                ic = rank_ic(
+                    [c["confidence"] for c in cal], [c["forward_return"] for c in cal]
+                )
+                ic_line = f"<p>AI 信心校准 Rank IC：{ic:+.3f}（已校准 {len(cal)} 笔）</p>"
+
+        # B-2：今日决策明细
+        today = last["date"]
+        today_dec = [d for d in db.get_decisions(acc["id"]) if d["date"] == today]
+        if today_dec:
+            dec_items = "，".join(
+                f"{d['symbol']} {d['action']} {d['amount']:,.0f}元(conf {d.get('confidence', '-')}) "
+                f"{str(d['reason'])[:26]}"
+                for d in today_dec[:6]
+            )
+            dec_line = f"<p>今日决策：{dec_items}</p>"
+        else:
+            dec_line = ""
+
+        # B-2/F-11：数据截至日期（异常时高亮）
+        bar_date = last.get("bar_date") or today
+        bar_note = f"（估值截至 {bar_date}）" if bar_date != today else ""
+        if bar_date > today:
+            data_until = max(data_until, bar_date)
+
         cards.append(
             f"""<div class="card {css}">
             <h2>{acc['name']}（{acc['engine_type']}）</h2>
             <p class="big">累计盈亏 <b>{last['pnl']:+,.2f} 元</b>（{pct:+.2f}%）</p>
-            <p>总资产 {last['total_assets']:,.2f} 元 ｜ 现金 {last['cash']:,.2f} 元</p>
+            <p>总资产 {last['total_assets']:,.2f} 元 ｜ 现金 {last['cash']:,.2f} 元 {bar_note}</p>
             <p>持仓：{holdings}</p>
             <p>累计成交 {len(trades)} 笔</p>
+            {dec_line}
+            {ic_line}
             </div>"""
         )
     cards_html = "\n".join(cards)
+
+    # B-2：基准对照（配置首个标的买入持有，覆盖首个快照至今；失败则留空不阻塞）
+    bench_line = ""
+    try:
+        ds = AkShareDataSource()
+        first_date = datetime.now().replace(year=2020)
+        for acc in db.get_accounts():
+            snaps = db.get_snapshots(acc["id"])
+            if snaps:
+                d = datetime.strptime(snaps[0]["date"], "%Y-%m-%d")
+                if d < first_date:
+                    first_date = d
+        first_sym = next(iter(settings.symbols))
+        cfg = settings.symbols[first_sym]
+        bars = ds.fetch_daily_bars(first_sym, 500, cfg.exchange, end_date=datetime.now())
+        bars = [b for b in bars if b.datetime >= first_date]
+        if len(bars) >= 2:
+            bench_ret = bars[-1].close / bars[0].close - 1
+            bench_line = (
+                f"<p>基准对照（{first_sym} 买入持有，{bars[0].datetime.date()}~"
+                f"{bars[-1].datetime.date()}）：{bench_ret:+.2%}</p>"
+            )
+    except Exception:
+        bench_line = ""
 
     img_b64 = ""
     if chart_path.exists():
@@ -124,7 +187,8 @@ def build_daily_report(
   .foot {{ color: #95a5a6; font-size: 12px; margin-top: 20px; }}
 </style></head><body>
 <h1>📊 AI 交易日报</h1>
-<p>生成时间：{datetime.now():%Y-%m-%d %H:%M}</p>
+<p>生成时间：{datetime.now():%Y-%m-%d %H:%M} ｜ 数据截至：{data_until or '—'}</p>
+{bench_line}
 {cards_html}
 <h2>多引擎资金曲线对比</h2>
 <img src="data:image/png;base64,{img_b64}" alt="资金曲线"/>

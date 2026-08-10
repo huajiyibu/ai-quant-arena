@@ -39,6 +39,7 @@ class DeepSeekEngine(DecisionEngine):
         temperature: float = 0.3,
         system_prompt_extra: str = "",
         feature_inject: bool = False,
+        market_env_inject: bool = False,
     ) -> None:
         import requests  # 延迟导入，便于测试时替换
 
@@ -53,6 +54,7 @@ class DeepSeekEngine(DecisionEngine):
         self.temperature = temperature
         self.system_prompt_extra = system_prompt_extra
         self.feature_inject = feature_inject
+        self.market_env_inject = market_env_inject
         # 响应缓存：以 (model, prompt) 为键（prompt 已完整编码决策输入；
         # ai 与 ai_policy 提示词相同时共享缓存，避免回测重复计费）
         self._cache = response_cache
@@ -79,6 +81,29 @@ class DeepSeekEngine(DecisionEngine):
             return f"{base}\n{self.system_prompt_extra}"
         return base
 
+    def _format_market_env(self, ctx: DecisionContext) -> str:
+        """市场温度计：用基准标的小特征拼一行市况（B-3，默认关）。"""
+        if not ctx.bars:
+            return ""
+        sym = next(iter(ctx.bars))
+        bars = ctx.bars[sym]
+        if not bars:
+            return ""
+        f = compute_features(bars)
+        if not f:
+            return ""
+        name = ctx.symbol_names.get(sym, sym)
+        parts = []
+        if "pct_from_high20" in f:
+            parts.append(f"距20日高点{f['pct_from_high20']:+.1%}")
+        if "ret_20d" in f:
+            parts.append(f"20日涨{f['ret_20d']:+.1%}")
+        if "vol_20d" in f:
+            parts.append(f"波动率{f['vol_20d']:.1%}")
+        if "rsi14" in f:
+            parts.append(f"RSI{f['rsi14']:.0f}")
+        return f"市场({name}): " + " ".join(parts)
+
     def _format_features(self, f: dict) -> str:
         """把特征字典拼成一行提示词文本（PP-2）。字段缺失时优雅省略。"""
         parts = []
@@ -104,6 +129,11 @@ class DeepSeekEngine(DecisionEngine):
         lines: list[str] = [
             f"今天是{ctx.date:%Y-%m-%d}，A股已收盘。各标的最近{self.lookback}个交易日收盘价："
         ]
+        # B-3：市场环境（让模型感知当前市况，默认关）
+        if self.market_env_inject:
+            env = self._format_market_env(ctx)
+            if env:
+                lines.insert(0, env)
         for symbol, bars in ctx.bars.items():
             name = ctx.symbol_names.get(symbol, symbol)
             closes = " ".join(f"{b.close:.3f}" for b in bars[-self.lookback:])

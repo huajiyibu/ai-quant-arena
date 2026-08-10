@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     fallback         INTEGER DEFAULT 0,
     validation       TEXT,
     execution_result TEXT,
+    forward_return   REAL,
     prompt_json      TEXT,
     raw_output_json  TEXT,
     created_at       TEXT NOT NULL
@@ -155,6 +156,8 @@ class Database:
                 conn.execute("ALTER TABLE decisions ADD COLUMN execution_result TEXT")
             if "confidence" not in d_cols:
                 conn.execute("ALTER TABLE decisions ADD COLUMN confidence REAL")
+            if "forward_return" not in d_cols:
+                conn.execute("ALTER TABLE decisions ADD COLUMN forward_return REAL")
             s_cols = {r[1] for r in conn.execute("PRAGMA table_info(daily_snapshots)").fetchall()}
             if "bar_date" not in s_cols:
                 conn.execute("ALTER TABLE daily_snapshots ADD COLUMN bar_date TEXT")
@@ -280,6 +283,37 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ---- calibration（B-1：真实盘 Rank IC 校准） ----
+    def get_uncalibrated_buys(self, account_id: int) -> list[dict]:
+        """未回填 forward_return 的 buy 决策（批处理后按 20 日窗口回填）"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT date, symbol, confidence FROM decisions "
+                "WHERE account_id=? AND action='buy' AND forward_return IS NULL",
+                (account_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_decision_forward_return(
+        self, account_id: int, date: datetime, symbol: str, fwd: float
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE decisions SET forward_return=? "
+                "WHERE account_id=? AND date=? AND symbol=? AND action='buy'",
+                (fwd, account_id, date.strftime(_DATE_FMT), symbol),
+            )
+
+    def get_calibrated_decisions(self, account_id: int) -> list[dict]:
+        """已回填的 (confidence, forward_return) 对，供真实盘 Rank IC 计算"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT confidence, forward_return FROM decisions "
+                "WHERE account_id=? AND action='buy' AND forward_return IS NOT NULL",
+                (account_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ---- snapshots ----
     def add_snapshot(self, account_id: int, date: datetime, state: AccountState, bar_date: str = "") -> None:
         with self._connect() as conn:
@@ -301,7 +335,8 @@ class Database:
     def get_snapshots(self, account_id: int) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT date, cash, total_assets, pnl FROM daily_snapshots WHERE account_id=? ORDER BY date",
+                "SELECT date, bar_date, cash, total_assets, pnl FROM daily_snapshots "
+                "WHERE account_id=? ORDER BY date",
                 (account_id,),
             ).fetchall()
         return [dict(r) for r in rows]

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, time
 
 from .config import Settings
 from .database import Database
@@ -51,7 +51,18 @@ class BatchRunner:
             logger.info("非交易日 %s，跳过批处理", date.strftime("%Y-%m-%d"))
             return {}
 
-        # 0.1 日历降级守卫：交易日历不可用时，工作日可能含节假日（清明/五一等），
+        # 0.1 收盘后运行守卫（A-3）：盘中（<15:00）运行会把盘中价当收盘价 → 拒绝当日结算
+        if (
+            date.date() == datetime.now().date()
+            and datetime.now().time() < time(15, 0)
+            and not force
+        ):
+            logger.error(
+                "当前未到收盘（<15:00），拒绝当日结算（避免用盘中价当收盘价）；--force 可强制"
+            )
+            return {"_warning": "before_close"}
+
+        # 0.2 日历降级守卫：交易日历不可用时，工作日可能含节假日（清明/五一等），
         #     akshare 会返回上一交易日旧 K 线易制造"节假日"假快照 → 保守跳过（--force 可强制）
         if getattr(self.data_source, "calendar_ok", True) is False and not force:
             logger.error(
@@ -87,10 +98,16 @@ class BatchRunner:
             return {"_warning": f"stale_bars:{','.join(stale_symbols)}"}
         bars_map = fresh
 
-        # 3. 各引擎独立运行
+        # 3. 各引擎独立运行（A-2：单引擎异常隔离，不拖垮其他引擎）
         results: dict[str, dict] = {}
         for engine_type, engine in self.engines.items():
-            results[engine_type] = self._run_engine(engine_type, engine, date, bars_map, force)
+            try:
+                results[engine_type] = self._run_engine(
+                    engine_type, engine, date, bars_map, force
+                )
+            except Exception as exc:
+                logger.exception("引擎 %s 运行异常，已隔离（不影响其他引擎）", engine_type)
+                results[engine_type] = {"error": str(exc), "skipped": True}
         return results
 
     # ------------------------------------------------------------------
@@ -112,6 +129,40 @@ class BatchRunner:
             logger.exception("宏观政策快讯获取失败，本次不参考政策")
             return ""
 
+    def _calibrate_forward_returns(
+        self, account_id: int, date: datetime, bars_map: dict
+    ) -> None:
+        """真实盘 Rank IC 校准（B-1）：对已满 20 交易日窗口的 buy 决策回填 forward return。
+
+        只回填 bars 已覆盖、且决策日后 20 交易日已存在的样本（无前视）；
+        窗口未满的留待后续批处理累积。
+        """
+        import bisect
+
+        close_by: dict = {}
+        dates_by: dict = {}
+        for sym, bars in bars_map.items():
+            dates_by[sym] = sorted(b.datetime.date() for b in bars)
+            close_by[sym] = {b.datetime.date(): b.close for b in bars}
+        for rec in self.db.get_uncalibrated_buys(account_id):
+            try:
+                d = datetime.strptime(rec["date"], "%Y-%m-%d").date()
+                dec_date = datetime.strptime(rec["date"], "%Y-%m-%d")
+            except ValueError:
+                continue
+            ds = dates_by.get(rec["symbol"], [])
+            idx = bisect.bisect_right(ds, d)
+            entry_pos, exit_pos = idx - 1, idx + 20 - 1
+            if entry_pos < 0 or exit_pos >= len(ds):
+                continue  # 窗口未满，等后续
+            entry = close_by[rec["symbol"]].get(ds[entry_pos])
+            exit_ = close_by[rec["symbol"]].get(ds[exit_pos])
+            if not entry or not exit_ or entry <= 0:
+                continue
+            self.db.update_decision_forward_return(
+                account_id, dec_date, rec["symbol"], exit_ / entry - 1
+            )
+
     def _fetch_and_store(self, end_date: datetime | None = None) -> tuple[dict[str, list], list[str]]:
         """拉取行情并落库；返回 (bars_map, 拉取失败的标的列表)"""
         bars_map: dict[str, list] = {}
@@ -120,7 +171,10 @@ class BatchRunner:
         for symbol, cfg in self.settings.symbols.items():
             try:
                 bars = self.data_source.fetch_daily_bars(
-                    symbol, self.settings.lookback_days + 5, cfg.exchange, end_date=end_date
+                    symbol,
+                    self.settings.lookback_days + 45,  # 覆盖 B-1 20 日回填窗口
+                    cfg.exchange,
+                    end_date=end_date,
                 )
             except Exception:
                 logger.exception("行情获取失败: %s", symbol)
@@ -227,6 +281,8 @@ class BatchRunner:
         self.db.add_snapshot(
             account_id, date, new_state, bar_date=actual_bar_date.strftime("%Y-%m-%d")
         )
+        # B-1：回填已满 20 交易日窗口的 buy 决策 forward return（真实盘 Rank IC 校准）
+        self._calibrate_forward_returns(account_id, date, bars_map)
         self.db.complete_batch_run(account_id, date)
 
         return {
