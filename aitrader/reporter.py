@@ -103,6 +103,7 @@ def build_daily_report(
 
         # B-1：真实盘 Rank IC 校准（AI 引擎信心是否有预测力）
         ic_line = ""
+        bucket_html = ""
         if acc["engine_type"] in ("ai", "ai_policy"):
             cal = db.get_calibrated_decisions(acc["id"])
             if len(cal) >= 5:
@@ -110,6 +111,34 @@ def build_daily_report(
                     [c["confidence"] for c in cal], [c["forward_return"] for c in cal]
                 )
                 ic_line = f"<p>AI 信心校准 Rank IC：{ic:+.3f}（已校准 {len(cal)} 笔）</p>"
+            # N-4：按信心分桶胜率（高信心是否真的更准；独立于 IC 门槛，有样本即渲染）
+            buckets = {"0~0.6": [], "0.6~0.7": [], "0.7+": []}
+            for c in cal:
+                cf = c["confidence"]
+                if cf < 0.6:
+                    buckets["0~0.6"].append(c["forward_return"])
+                elif cf <= 0.7:
+                    buckets["0.6~0.7"].append(c["forward_return"])
+                else:
+                    buckets["0.7+"].append(c["forward_return"])
+            bucket_rows = []
+            for name, vals in buckets.items():
+                if not vals:
+                    continue
+                n = len(vals)
+                win = sum(1 for v in vals if v > 0) / n
+                avg = sum(vals) / n
+                bucket_rows.append(
+                    f"<tr><td>{name}</td><td>{n}</td><td>{win:.0%}</td><td>{avg:+.2%}</td></tr>"
+                )
+            if bucket_rows:
+                bucket_html = (
+                    "<p>按信心分桶（正收益占比）：</p>"
+                    "<table border=1 cellpadding=4 cellspacing=0>"
+                    "<tr><th>信心</th><th>样本</th><th>胜率</th><th>均收益</th></tr>"
+                    + "".join(bucket_rows)
+                    + "</table>"
+                )
 
         # B-2：今日决策明细
         today = last["date"]
@@ -139,6 +168,7 @@ def build_daily_report(
             <p>累计成交 {len(trades)} 笔</p>
             {dec_line}
             {ic_line}
+            {bucket_html}
             </div>"""
         )
     cards_html = "\n".join(cards)

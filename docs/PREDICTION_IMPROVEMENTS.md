@@ -6,117 +6,118 @@
 
 ## 状态快照（2026-08-10）
 
-- 已落地并验证：PP-1 成交假设校准（close/next_open）、PP-2 特征注入+复权、PP-3 system 三段式+缓存键修正、PP-4 置信度门槛+Rank IC 闭环、数据时效全链路（v0.8 实时补全 / v0.9 政策截断+行情硬校验）。
-- **v0.10/v0.11 批量落地（2026-08-10，测试 136 全过）**：A-1 真实盘接入特征注入最优配置（config.json `feature_inject:true` + `--feature-inject` 批处理生效）；A-4 未来日期拒绝；A-2 引擎级异常隔离（单引擎异常不拖垮其他）；A-3 收盘后 15:00 运行守卫（盘中拒绝当日结算）；A-5 回测默认 end=最近已收盘交易日；P2-1 回测默认从 config 读（config.json `fill_mode:next_open` + `adjust:hfq`）；P2-2 滑点建模（`slippage_bps` + `--slippage`）；B-1 真实盘 Rank IC 校准闭环（`decisions.forward_return` 回填 + 日报展示）；B-2 日报升级（今日决策明细 + 基准对照 + 数据截至日期）；B-3 市场环境注入（`market_env_inject` 功能已实现，默认关，A/B 验证后开启）。
-- A/B 结论：最优配置 = 原 system + `--feature-inject --adjust hfq`（AI 1 年 +21.7%、夏普 1.77、跑赢买入持有 +19.58%）；置信度门槛无预测信息（Rank IC≈0）；"大胆化"变体一失败已回滚。
+- 已落地并验证：PP-1 成交假设校准（close/next_open）、PP-2 特征注入+复权、PP-3 system 三段式+缓存键修正、PP-4 置信度门槛+Rank IC 闭环、数据时效全链路（v0.8 实时补全 / v0.9 政策截断+行情硬校验）、A-1~A-5 可靠性、P2-1/P2-2 配置对齐与滑点、B-1/B-2 真实盘校准与日报（v0.10/v0.11，测试 136 全过）。
+- **当前最优配置已全部落地**：回测默认 `fill_mode:next_open` + `adjust:hfq`（P2-1）；真实盘 `feature_inject:true`（A-1，config.json）——**但注意 N-1：真实盘特征实际基于未复权价计算（A-1 只做了一半）**，详见待办。
+- A/B 结论（已固化）：最优 = 原 system + `--feature-inject --adjust hfq`（AI 1 年 +21.7%、夏普 1.77、跑赢买入持有 +19.58%）；置信度门槛无预测信息（Rank IC≈0）；"大胆化"变体一失败已回滚。
 - ⚠️ LLM 记忆局限：回测区间（2025-06~2026-08）可能被模型"记住"（开卷考试）→ 回测绝对收益可能高估、不可外推；A/B 相对对比仍有效；**真实盘才是最终考场**（B-1 已为其装评分表）。
+- 🔎 **本轮评审（2026-08-10，主 agent 亲自读码）**：用户要把系统升级成"自动量化 Agent"。发现 12 条新缺口（N-1~N-12，其中 N-3/N-11/N-12 低优先级）+ 4 条存量（PP-5~PP-8）。核心判断：**工程可靠性已达标，重心转到 ① 真实盘口径一致性（N-1）② 无人值守自愈与可观测（N-2/N-8/N-9/N-10）③ 决策质量闭环（N-4/N-5/B-3 收口）**。
 
 ---
 
 ## 待落地清单（按 P0 / P1 / P2 分级）
 
-> 已落地项（PP-1~PP-4、复权接入、Rank IC 闭环、网络修复）见下方"落地记录"，此处仅列**未落地 + 本轮新发现**。
+> 已落地项（PP-1~PP-4、复权接入、Rank IC 闭环、网络修复、A-1~A-5、B-1/B-2、P2-1/P2-2）见下方"落地记录"；此处仅列**未落地 + 本轮新发现（N-1~N-12）**。
 
-### P0（真实盘关键缺口 / 数据可信度，建议最先处理）
+### P0（真实盘口径一致性 / 无人值守可靠性，建议最先处理）
 
-- [ ] **A-1｜真实盘接入"特征注入"最优配置（【新发现】）**
-  - 现状：A/B 已证明 `--feature-inject --adjust hfq` 为最优配置（+21.7% vs +7.3%，夏普 1.77 vs 1.10）。但 `run.py` 中该开关只在 `run_backtest` 分支应用——`_run` 每日批处理路径不读 `args.feature_inject`，`config.json` 也不暴露该字段 → **真实盘永远跑"裸收盘价"提示词，A/B 最优成果悬空**。
-  - 问题：评测证明最优的配置无法用于真实盘 = 评测与实盘脱节；用户每天看到的日报是"次优版 AI"。
-  - 改法：① `config.json` 增加 `feature_inject: false`、`adjust: "none"` 字段（`Settings.feature_inject` 已有，补 `adjust` 到 Settings）；② `run.py::_run` 批处理分支读取 `settings.feature_inject` 传给引擎；③ 真实盘开启时，特征用复权价计算（避免除权跳空失真）、估值/成交仍用原始价（口径差异写进 README）。
-  - 验收：pytest 断言批处理路径读 `config.feature_inject` 传给 `DeepSeekEngine.feature_inject`；`--feature-inject` 在非回测模式也生效。
+- [ ] **N-1｜真实盘特征注入用的是未复权行情——A-1 只做了一半（【新发现】）**
+  - 现状：`config.json` 已 `feature_inject:true` + `adjust:"hfq"`，回测走 `adjust=hfq`；但 `batch.py::_fetch_and_store` 调 `fetch_daily_bars` 时**没有传 `adjust`** → 真实盘喂给 `compute_features` 的 bars 是**未复权原始价**。
+  - 问题：除权日价格跳空会让 MA/RSI/距高/动量等特征失真（与回测口径不一致）；A-1 原意"特征用复权价、估值/成交用原始价"只实现了一半——用户以为真实盘跑的是 A/B 最优配置，实际是"特征失真版"。
+  - 改法：批处理对每个标的拉复权价（复用 `adjust="hfq"`）专供特征计算，估值/成交仍用原始价（batch 内部对 bars 做 `compute_adjusted_bars` 算特征，再传原始价给估值/成交即可）；口径差异写进 README。
+  - 验收：pytest 断言批处理喂给特征的是复权价、估值/成交用原始价；除权日前后特征无跳变。
 
-- [ ] **A-2｜引擎级异常隔离（【新发现】）**
-  - 现状：`batch.py::run` 的引擎循环 `for engine_type, engine in self.engines.items(): results[...] = self._run_engine(...)` 无 try/except；`_run_engine` 内账户创建/落库/状态操作异常会中断整个循环，后续引擎全部不跑（HLD §6 的"单引擎失败不影响整体"只覆盖了 `decide` 内部降级）。
-  - 问题：一个引擎的库/状态异常拖垮全部引擎，且失败无汇总告警；无人值守下更难发现。
-  - 改法：`_run_engine` 外层包 try/except，捕获后把 `engine_failed: 原因` 写入该引擎结果并 continue。
-  - 验收：pytest 断言某引擎 `_run_engine` 抛异常时，其余引擎仍返回结果，且 `_warning` 含失败引擎名。
+- [x] **N-2｜崩溃遗留的 `batch_runs.status='running'` 会把账户卡死在"假跳过"（【新发现】）**
+  - 现状：`_run_engine` 在 `begin_batch_run`（写 running）之后、`add_snapshot` 之前崩溃（如 `execute_decisions` 抛异常 / 落库失败），该日留下 `(account_id,date,'running')` 且无快照；`database.has_batch_run` 不区分状态 → 当日再跑（启动项+定时任务双触发/手动）直接跳过，且 `has_snapshot` 为假时返回 `initial_capital` 当"总资产"，**掩盖已有持仓与成交**；该日也永远不会被自动补做。
+  - 问题：无人值守下崩溃一次就产生"假跳过 + 假净值"，且无法自愈。
+  - 改法：① `has_batch_run` 只认 `status='done'` 才算已处理；② `begin_batch_run` 对同日的 running 允许覆盖重试；③ 无快照的 running 一律允许重跑。
+  - ✅ **v0.12 已落地（2026-08-10）**：`has_batch_run` 改为 `AND status='done'`；`begin_batch_run` 用 `ON CONFLICT DO UPDATE ... WHERE status='running'`（done 不被重试打回）；崩溃遗留 running 无快照 → 重跑自动补齐快照。测试 `test_stale_running_gets_rerun` / `test_begin_retry_keeps_done` 覆盖；v0.4 旧测试同步更新到新语义。
 
-- [ ] **A-3｜收盘后运行时间守卫（存量 F-3）**
-  - 现状：无运行时段校验。15:30 前跑批处理（定时任务误配/手动）会用**盘中实时价**做"当日收盘价"决策与估值——虽已修 `bar_date==决策日`，但盘中价≠收盘价，口径错误。
-  - 问题：盘中运行产出"假收盘"快照，污染账本与日报。
-  - 改法：批处理在决策日 15:00 前运行且非 `--force` → 返回 `_warning=before_close` 并跳过交易（仅刷新报表），日志显著提示。
-  - 验收：pytest 断言 14:59 运行返回 `before_close` 且无成交；15:31 正常运行。
+- [ ] **N-3｜真实盘成交口径与 `fill_mode:next_open` 语义混淆（【新发现】，低危但需写清）**
+  - 现状：`config.json` `fill_mode:"next_open"` 是回测假设（PP-1）；真实盘批处理 `execute_decisions` 不带 `fill_prices` → **实际按当日收盘价成交**，fill_mode 对批处理完全无作用。
+  - 问题：用户/维护者看到"最优配置 = next_open"会误以为真实盘也在等次日开盘成交（实盘其实收盘即成交）；口径不写清易误读日报与回测对比。
+  - 改法：README + `last_run.json` 明确标注"真实盘 = 收盘价成交（滑点默认 0）；回测 next_open + slippage 是更严苛口径，真实盘表现应不优于回测"；`last_run.json` 加 `fill_note`。
+  - 验收：pytest 断言批处理成交价 = 决策日收盘（现有语义）；日志/文档有口径说明。
 
-- [ ] **A-4｜`--date` / 回测未来日期拒绝（存量 F-4）**
-  - 现状：`_date_type` 只校验格式不校验未来；`--date 2030-01-01` 会拉未来行情、行为不确定；回测 `--end` 同理。
-  - 问题：未来日期静默产生空数据/异常，难排查。
-  - 改法：`_date_type` 增加 `> today` 校验，抛 `ArgumentTypeError`。
-  - 验收：pytest 断言未来日期被拒并提示。
+### P1（决策质量 / 评测闭环）
 
-- [ ] **A-5｜回测 `end==今天` 盘中混入（存量 F-5/F-13）**
-  - 现状：回测默认 `end = datetime.now()`；今天盘中运行时，实时补全会把"今天盘中价"塞进回测最后一根 → 回测结果混入未收盘数据，与历史区间口径不一致。
-  - 问题：盘中回测的数字不可比、误导结论。
-  - 改法：回测 `end` 默认取"最近已收盘交易日"（今天 15:30 前 → end=上一交易日）；`--end 今天` 显式传入时给出提示。
-  - 验收：pytest 断言盘中（<15:30）默认回测 end 不含今天。
+- [x] **N-4｜真实盘 Rank IC 只有累计一个数，缺"按置信度分桶胜率"与滑窗趋势（【新发现】）**
+  - 现状：B-1 已回填 `decisions.forward_return`；`reporter.build_daily_report` 只算一个累计 `rank_ic`（样本 ≥5 才显示）。
+  - 问题：累计 IC 被早期样本主导；且"AI confidence 有没有用"更直观的呈现是**分桶胜率**——把已校准 buy 按 confidence 分桶（如 <0.6 / 0.6~0.7 / >0.7）统计每桶"正收益占比/平均收益/样本数"，用户一眼看出"高信心是否真的更准"（当前 AI confidence 集中 0.6~0.7，分桶正是为此设计）。
+  - 改法：日报加"confidence 分桶胜率"小表（复用已回填 decisions）；可选加近 20 笔滑窗 IC 趋势。
+  - ✅ **v0.12 已落地（2026-08-10，分桶部分）**：日报新增"按信心分桶（正收益占比）"表，桶 `0~0.6` / `0.6~0.7` / `0.7+`，独立于 IC 样本门槛（有样本即渲染）。滑窗 IC 趋势留待后续。
 
-### P1（决策质量提升 / 评测闭环）
+- [ ] **N-5｜决策理由自由文本，缺结构化归因标签——无法自动复盘（【新发现】）**
+  - 现状：`decisions.reason` / `trades.reason` 是自由文本，无可枚举的"这单是趋势/回调/政策/超买哪个理由"维度。
+  - 问题：PP-6（历史盈亏反馈）是"喂给模型的复盘"，但在此之前缺"给用户的自动复盘"：哪类理由的买入后来亏了、哪类赚了，完全无法统计。
+  - 改法：提示词要求 `reason` 以标签开头（如 `[趋势]`/`[回调]`/`[政策]`/`[超买]`/`[其他]`，输出契约加枚举说明）；新增 `scripts/attribution.py`（或 reporter 内）按标签聚合已平仓交易盈亏，输出到日报/周报。纯 prompt + 统计，零 schema 变化。
+  - 验收：pytest 断言标签解析与聚合正确；未带标签的 reason 归入"其他"不崩溃。
 
-- [ ] **B-1｜真实盘 Rank IC 校准闭环——让"最终考场"也能评分（【新发现】）**
-  - 现状：Rank IC 只在回测内存计算（`backtest.py` 收集 buys → `compute_forward_returns` → `rank_ic`）；真实盘每天产生 buy 决策并已落库 `decisions.confidence`（PP-4），但**从未回填"未来收益"** → 真实盘置信度有无预测信息完全不可知（LLM 记忆局限下，回测 Rank IC 还可能被污染）。
-  - 问题：真实盘是唯一无"记忆污染"的考场，却没有任何校准度输出；用户无法判断"AI 的信心到底可不可信"。
-  - 改法：① 每日批处理后回填：对 T-20 个交易日前的 buy 决策（决策日已过去 20 个交易日）计算 forward return 回填 `decisions`（新增 `forward_return` 列 + migration）；② 日报/周报展示真实盘累计 `rank_ic`（复用 `rank_ic` 函数）；③ 无前视：只在"决策日后 20 个交易日"已存在时回填。
-  - 验收：pytest 断言回填逻辑无前视（只回填已满足 20 交易日窗口的决策）；日报展示真实盘 Rank IC + n。
+- [ ] **N-6｜B-3 市场环境注入"落地一半"：已实现但从未 A/B，真实盘也没接线（【新发现】）**
+  - 现状：`_format_market_env` 纯函数已实现且有单测，`Settings.market_env_inject` 默认 False、config.json 无字段、`--market-env` 只在回测分支生效、批处理不读。
+  - 问题：一个"可能有用也可能有害"的提示词特性挂在中途——既没被验证（无 A/B 结论），又无法在真实盘开启。
+  - 改法：① 先做小样本回测 A/B（A=现状 vs B=+市场环境行，同 system/特征/复权，同区间，≈几百次 API 一次计费）出结论；② 若 B 样本外 Sharpe ≥ A+0.1 再在 config 暴露 `market_env_inject` 给真实盘，否则按"无增量"如实记录并保持默认关。
+  - 验收：pytest 断言 prompt 含/不含市场环境行受开关控制（已有）；A/B 结论写入本文档。
 
-- [ ] **B-2｜日报升级：今日决策明细 + 基准对照 + 数据截至日期（【新发现】+存量 F-11）**
-  - 现状：`reporter.py::build_daily_report` 只显示累计盈亏/持仓/成交笔数，无"今日各引擎做了什么决策、理由是什么"；无基准（买入持有）对照；无"数据截至日期"。
-  - 问题：用户只看到结果数字，看不到 AI 的当日行为与理由，无法判断"AI 今天是否理性"；无基准对照无法判断跑赢跑输大盘；无数据截至日期无法核对"日报是不是今天的"（用户曾因数据滞后产生疑惑）。
-  - 改法：① 日报加"今日决策"卡片（读 `decisions` 当日记录：symbol/action/amount/confidence/reason）；② 加基准对照（区间买入持有收益，复用 `compute_benchmark`）；③ 标注数据截至日期（取最新 snapshot 的 bar_date，v0.9 已落库）。
-  - 验收：pytest 断言日报含当日决策条目、基准收益、数据截至日期。
-
-- [ ] **B-3｜市场环境注入——让模型知道"现在是什么市况"（【新发现】，可回测 A/B）**
-  - 现状：`_build_prompt` 只喂各标的裸收盘价 + 特征 + 账户状态，无"当前市场处于什么阶段"的上下文（如：沪深300 距 20 日高点 / 20 日收益 / 整体是普涨还是阴跌）。
-  - 问题：AI 在回测中被实测"过度保守"（hold 93%），一部分原因可能是它无法感知"当前是趋势市还是震荡市"，永远套同一套保守逻辑；喂一个"市场温度计"（已有 `features.py` 的 `pct_from_high20/ret_20d/vol_20d` 可复用）能让模型区分"趋势确认该上车 vs 超买该回避"。
-  - 改法：`_build_prompt` 开头加一行市场环境：`市场: 510300 距20日高点-3.2% 20日涨+5.1% 波动率18%`（取基准标的或全池均值，纯函数算好再注入，不增加模型心算负担）。
-  - 实验设计：A=现状 vs B=+市场环境行，同 system/特征/复权，同区间 2025-06~2026-08；AI 缓存键含 prompt → 自动隔离，B 首次单独计费 ≈240 次。判定：B 样本外 Sharpe ≥ A+0.1 且成交数不显著下降；不满足则回退。
-  - 风险与副作用：prompt 略变长；可能引导模型"看图说话"贴标签而非决策；需先小样本验证方向再全量。
-  - 验收：pytest 断言 prompt 含市场环境行；`_format_market_env` 纯函数单测。
-
-- [ ] **PP-5｜止损/止盈/回撤熔断网格——诚实检验"止损是否真的帮 AI"（【低置信探索】）**（存量未落地）
+- [ ] **PP-5｜止损/止盈/回撤熔断网格——诚实检验"止损是否真的帮 AI"（【低置信探索】，存量未落地）**
   - 现状：`risk.py::validate_buy`、`portfolio.py::execute_decisions` 均无止损/止盈/回撤熔断；sell 完全由模型决定；`RiskConfig` 无相关参数（IMPROVEMENTS P1-5 已立项未落地）。
-  - 问题：AI 卖出决策滞后于价格（只在决策日表态），单边下跌中可能死扛到深亏；**但止损对趋势型策略是双刃剑**——本场景 AI 无固定趋势风格，固定止损可能在正常回调中被迫离场、趋势恢复后再追高，形成"割肉+追高"双边损耗（震荡市更甚）。**故绝不默认止损有用，必须网格实测**；回撤熔断（账户级冷却）相对安全（防尾部风险、保护模拟盘本金语义）。
-  - 改法：① `RiskConfig` 加 `stop_loss_pct=0.0`（0=关闭）、`take_profit_pct=0.0`、`max_drawdown_halt=0.0`、`halt_cooldown_days=5`；② 新增 `portfolio.py::apply_stop_rules(state, prices, risk, date) -> (state, forced_trades, halted)` 纯函数：持仓现价 ≤ 成本×(1-止损) → 强制整仓卖；≥ 成本×(1+止盈) → 止盈；账户回撤 ≥ 熔断 → 全部清仓 + 冷却标记（决策前由 `batch.py::_run_engine` 与 `backtest.py` 回放循环读冷却态，强制 hold N 日）；③ 在 `execute_decisions` 之前调用。
-  - 实验设计：网格 stop_loss ∈ {0,5%,8%,12%} × take_profit ∈ {0,10%,20%}，对 rule 与 ai 引擎分别全组合回测同区间（2021-01~2024-12）；熔断 20%。判定（必须可回测）：某组合样本外 Sharpe ≥ 无止损基线 +0.1 **且** max_drawdown 下降 ≥3pp 才记为有效；**若所有止损档都不优于无止损，如实保留"无止损"为默认并记录结论**（这正是本次评审要诚实回答的问题）。多重比较防护：把 2025-01~2026-06 留作最终确认样本，网格只在训练段选优。
+  - 问题：AI 卖出滞后于价格（只在决策日表态），单边下跌可能死扛到深亏；**但止损对无固定趋势风格的 AI 是双刃剑**——固定止损可能在正常回调被迫离场、趋势恢复后再追高，形成"割肉+追高"双边损耗。**故绝不默认止损有用，必须网格实测**；回撤熔断（账户级冷却）相对安全。
+  - 改法：① `RiskConfig` 加 `stop_loss_pct=0.0`（0=关闭）、`take_profit_pct=0.0`、`max_drawdown_halt=0.0`、`halt_cooldown_days=5`；② 新增 `portfolio.py::apply_stop_rules(state, prices, risk, date) -> (state, forced_trades, halted)` 纯函数：持仓现价 ≤ 成本×(1-止损) → 强制整仓卖；≥ 成本×(1+止盈) → 止盈；账户回撤 ≥ 熔断 → 全部清仓 + 冷却标记（`batch._run_engine` 与 `backtest` 回放循环读冷却态，强制 hold N 日）；③ 在 `execute_decisions` 之前调用。
+  - 实验设计：网格 stop_loss ∈ {0,5%,8%,12%} × take_profit ∈ {0,10%,20%}，rule 与 ai 分别全组合回测同区间（2021-01~2024-12）；熔断 20%。判定：某组合样本外 Sharpe ≥ 无止损基线+0.1 **且** max_drawdown 下降 ≥3pp 才记为有效；**若所有止损档都不优于无止损，如实保留"无止损"为默认并记录结论**。多重比较防护：2025-01~2026-06 留作最终确认样本，网格只在训练段选优。
   - 风险与副作用：网格最优易过拟合（需留样本外）；止损+佣金在震荡市双杀；冷却期可能错过反弹。改动集中在 risk/portfolio 纯函数，schema 无变化。
   - 验收：pytest 断言触发止损生成强制 sell 成交且 reason 含 `[stop_loss]`；冷却期内引擎决策被替换为 hold；网格实验脚本输出全组合指标表并标注最优，供人审阅而非自动采纳。
 
-- [ ] **PP-6｜历史交易盈亏反馈——让 AI 学会"复盘"（【低置信探索】）**
-  - 现状：`deepseek.py::_build_prompt` 只含当前持仓成本与浮盈，无历史已平仓交易及盈亏；模型每次决策"失忆"，无法从过去买卖的错误中学习，重复追高/死扛模式无法自我纠正。
-  - 问题：无行为反馈 = 模型在"无记忆的重复试错"。注入"近 N 笔已平仓交易 + 盈亏 + 当时理由"，让模型建立"行为→结果"关联（哪些理由导致亏损、哪些赚了），可抑制重复犯错；这是 LLM 决策特有的低边际成本增量（数据已在 trades 表）。
-  - 改法：① `_build_prompt` 追加一节"近期已平仓交易（复盘参考）"：取近 `feedback_n`（配置，默认 5）笔**已平仓**（有 sell）的 (symbol, buy日期/价, sell日期/价, pnl_pct, buy_reason) 按时间倒序；② `DecisionContext` 增加 `recent_closed_trades: list[dict]`（由 `batch.py::_run_engine` / `backtest.py` 从各自库注入，回测用回测库 trades）；③ 缓存键自动含该节（prompt 变化）→ 不同历史不同 prompt，不串缓存；④ 铁律：只取**实际成交** trades，不含被风控拒绝/未成交的决策，避免"假亏损"污染复盘。
-  - 实验设计：A=无反馈 vs B=近 5 笔 vs C=近 10 笔，同区间。判定：B/C 样本外 profit_factor ≥ A+0.1 且"重复亏损模式"（同标的高位追买再次亏损的连续次数）下降；控制近因偏差：反馈只含已发生（≤当日）交易，回测无前视。
-  - 风险与副作用：反馈近因偏差（模型只学最近一段行情风格）；"过度反思"致成交数下降；prompt 变长。改动小（prompt 一节 + context 一字段）。
-  - 验收：pytest 断言注入的反馈只含已平仓实际成交、不含未来成交（回测无前视）；条目 ≤ 配置上限；`feedback_n=0` 关闭。
+- [ ] **PP-6｜历史交易盈亏反馈——让 AI 学会"复盘"（【低置信探索】，存量未落地）**
+  - 现状：`deepseek.py::_build_prompt` 只含当前持仓成本与浮盈，无历史已平仓交易及盈亏；模型每次决策"失忆"，重复追高/死扛模式无法自我纠正。
+  - 问题：无行为反馈 = 模型在"无记忆的重复试错"。注入"近 N 笔已平仓交易 + 盈亏 + 当时理由"，让模型建立"行为→结果"关联，可抑制重复犯错；数据已在 trades 表，边际成本低。
+  - 改法：① `_build_prompt` 追加"近期已平仓交易（复盘参考）"：取近 `feedback_n`（默认 5）笔**已平仓**（有 sell）的 (symbol, buy日期/价, sell日期/价, pnl_pct, buy_reason) 倒序；② `DecisionContext` 增加 `recent_closed_trades: list[dict]`（`batch._run_engine` / `backtest` 各自注入）；③ 缓存键自动含该节（prompt 变化）→ 不串缓存；④ 铁律：只取**实际成交** trades，不含被风控拒绝/未成交的决策。
+  - 实验设计：A=无反馈 vs B=近 5 笔 vs C=近 10 笔，同区间。判定：B/C 样本外 profit_factor ≥ A+0.1 且"重复亏损模式"下降；控制近因偏差：反馈只含已发生（≤当日）交易，回测无前视。
+  - 风险与副作用：反馈近因偏差；"过度反思"致成交数下降；prompt 变长。改动小（prompt 一节 + context 一字段）。
+  - 验收：pytest 断言反馈只含已平仓实际成交、不含未来成交（回测无前视）；条目 ≤ 配置上限；`feedback_n=0` 关闭。
 
-- [ ] **PP-7｜政策时效与归因——先让"政策版"可回测（【低置信探索】）**
-  - 现状：`batch.py::_fetch_policy` 拉政策但不落库；`datasource.py::AkSharePolicySource.fetch_macro_news` 返回 `"标题｜内容"` 整段（**未取财联社电报时间戳**），`_build_prompt` 整段塞入最多 8 条；`backtest.py` 中 `policy_text=""` → **ai_policy 永远无法在回测中验证**（IMPROVEMENTS P1-4 已提存档，此处聚焦其预测价值闭环）。
-  - 问题：政策版与纯价格版孰优完全不可知（评测盲区）；"当日 15:30 后发布的政策"若塞进"当日 15:30 决策"即构成前视（用未来信息），当前无时间判断无法保证时效边界；无归因（政策→标的/板块映射缺失）导致模型无法判断"哪条政策影响哪个持仓"。
-  - 改法：① 新增 `policy_archive` 表（date, time, title, content, hit_keywords），`_fetch_policy` 落库；`AkSharePolicySource` 增取时间戳列（需调研 `ak.stock_info_global_cls` 的列名，取不到用拉取日期兜底）；② `_build_prompt` 政策节改为结构化单行 `[09:35|央行|降准0.5pp|标题摘要]`，提示"判断是否已被价格反映（预期差），只对超预期的给行动；与你持仓无关则忽略"；③ `Backtester` 增加 `policy_by_date: dict[date, str]`（从 archive 按日期回放），决策日只注入 ≤ 当日 15:30 发布的历史政策（无前视）；否则维持 `policy_text=""` 并如实标注"政策版未验证"。
-  - 实验设计：ai vs ai_policy（同日历史政策注入），区间取 archive 有数据后（先积累 3 个月再评估，或用手工标注样例区间）。判定：ai_policy 样本外 Sharpe ≥ ai+0.1 才认定政策有增量价值；若 <0.1 如实报告"政策无增量，可能为噪音"，并降级为不启用。
+- [ ] **PP-7｜政策时效与归因——先让"政策版"可回测（【低置信探索】，存量未落地）**
+  - 现状：`batch.py::_fetch_policy` 拉政策但不落库；`AkSharePolicySource.fetch_macro_news` 返回 `"标题｜内容"` 整段（未取财联社电报时间戳），`_build_prompt` 整段塞入最多 8 条；`backtest.py` 中 `policy_text=""` → **ai_policy 永远无法在回测中验证**。
+  - 问题：政策版与纯价格版孰优完全不可知（评测盲区）；"当日 15:30 后发布的政策"若塞进"当日 15:30 决策"即构成前视；无归因（政策→标的/板块映射缺失）导致模型无法判断"哪条政策影响哪个持仓"。
+  - 改法：① 新增 `policy_archive` 表（date, time, title, content, hit_keywords），`_fetch_policy` 落库；`AkSharePolicySource` 增取时间戳列（调研 `ak.stock_info_global_cls` 列名，取不到用拉取日期兜底）；② `_build_prompt` 政策节改结构化单行 `[09:35|央行|降准0.5pp|摘要]`，提示"判断是否已被价格反映（预期差），只对超预期的给行动；与你持仓无关则忽略"；③ `Backtester` 增加 `policy_by_date: dict[date, str]`（从 archive 按日期回放），决策日只注入 ≤ 当日 15:30 发布的历史政策（无前视）；否则维持 `policy_text=""` 并如实标注"政策版未验证"。
+  - 实验设计：ai vs ai_policy（同日历史政策注入），区间取 archive 有数据后（先积累 3 个月再评估）。判定：ai_policy 样本外 Sharpe ≥ ai+0.1 才认定政策有增量价值；若 <0.1 如实报告"政策无增量，可能为噪音"，并降级为不启用。
   - 风险与副作用：政策回放依赖 archive 数据积累（新功能，先落数据层）；政策时间与 15:30 决策的先后边界需严格校验（前视风险）；关键词过滤漏报/误报影响归因。
   - 验收：pytest 断言 archive 落库且含时间戳；回测注入的政策日期 ≤ 决策日 15:30；`policy_text` 结构化条目含时间/关键词/摘要。
 
-### P2（探索性 / 运维支撑，谨慎）
+### P2（自动 Agent 化 / 运维可观测，探索性）
 
-- [ ] **PP-8｜标的池分散与轮动——用相关性而非数量决定分散（【低置信探索】）**（存量未落地）
-  - 现状：`config.json::symbols` 仅 510300（沪深300ETF）/588000（科创50ETF）/159915（创业板ETF）三只宽基 ETF（科创50/创业板成长风格高度相关），`max_buy_count=2`；无轮动/择时切换；AI 只能在高度相关的池子里"伪选择"。
-  - 问题：池内高相关 → 组合实际分散度低，AI 选哪只都近似（alpha 空间被相关结构锁死）；但**扩大池子的风险**：标的上市时间/数据缺失导致样本对齐问题、AI 注意力被稀释、评测噪声增大、且"选哪些标的进池"本身极易在样本外过拟合。故第一步不是加标的，而是**先量化相关性**，用数据决定。
-  - 改法：① 新增 `scripts/corr_analysis.py`（或 tests 内函数）：对配置池任意两标的计算 20 日收益滚动相关性，输出矩阵，阈值 ≥0.7 判定"冗余"；② 若确需扩充：优先低相关且 ETF 数据完整（如 511010 国债ETF、518880 黄金ETF；**需核验 akshare 数据可用性与复权**），保留 `max_buy_count` 并加提示词约束"同类资产最多 1 个"；③ 提示词给每标的加资产类别标签（`510300(沪深300ETF/权益)`、`511010(国债ETF/利率)`）。
-  - 实验设计：池 A=现 3 宽基 vs 池 B=+低相关标的（若数据可用），同引擎同区间；另做"池不变仅改分散约束"的纯提示词对照（隔离池子效应的混淆变量）。判定：池 B 样本外 Sharpe ≥ 池 A+0.1 **或** max_drawdown 下降 ≥3pp 且收益不劣化；相关性分析先行，若现池相关性全部 >0.85 而扩充池引入 <0.3 相关标的，组合夏普提升的**机械理由**才成立。
+- [ ] **N-8｜每日批处理无 API 成本/调用量记账（【新发现】）**
+  - 现状：真实盘每天固定 2 次 DeepSeek 调用（ai + ai_policy）+ 行情/政策拉取；`last_run.json` 不记 API 调用次数与估算费用。
+  - 问题：模型被改贵 / 缓存失效 / 误配时成本漂移，无人值守下用户无法察觉。
+  - 改法：`DeepSeekEngine` 加进程内 `api_call_count`（含缓存命中数）；`write_last_run` 记录 `api_calls` + `est_cost`（按次估算，写进 last_run 即可，不追求精确）。
+  - 验收：pytest 断言缓存命中/未命中计数正确；`last_run.json` 含调用量字段。
+
+- [ ] **N-9｜连续缺交易日不自动补跑——启动项只补"今天"（【新发现】）**
+  - 现状：`install_task.ps1` = 每天 15:30 定时任务 + 登录时跑一次 `run.py`（仅当天）。若连续几天关机（周末+节假日+周一早上开机），只有"当天"被补跑，**前几个工作日缺失**（幂等不会重复成交，但缺失日期的决策/估值永远空白）。
+  - 问题：真实盘账本"跳日"，资金曲线/基准对照不连续，Rank IC 样本少。
+  - 改法：新增 `--catch-up [N]`：从最近一次快照日的次日开始，逐日补齐缺失交易日（内部循环 `--date`，幂等）；启动项改为 `run.py --catch-up`。
+  - 验收：pytest 断言连续缺失 N 天后 catch-up 补齐全部快照且不重复成交；无缺失时 no-op。
+
+- [ ] **N-10｜无主动通知——机器坏了用户不知道（【新发现】）**
+  - 现状：定时任务失败 / key 失效 / 行情源变化只写日志 + `last_run.json`，用户不打开就无从知晓。
+  - 改法：批处理结束检查"本次失败 / 连续 N 日无成交 / 净值回撤超阈值 / AI 缓存命中率骤降"，触发 Server酱/邮件/webhook 推送（新增 `aitrader/notify.py`，失败不阻塞主流程）；`config.json` 加 `notify` 开关。
+  - 验收：pytest 断言告警条件判定纯函数正确；推送失败不影响批处理结果。
+
+- [ ] **N-11｜`bars` 表只写不读 + 数据源单点（存量 IMPROVEMENTS P2-1）**
+  - 现状：`database.save_bars` 落库但无读取调用点；批处理/回测每次联网全量拉取，新浪单点挂了就全挂。
+  - 改法：`fetch_daily_bars` 先查 `bars` 表缓存、缺的再补拉；行情源失败时 fallback 腾讯实时接口（`_fetch_realtime` 已实现，可推广为独立 fallback 源）。
+  - 验收：pytest 断言缓存命中减少网络调用；主源失败降级不抛错。
+
+- [x] **N-12｜`--date` 回放与真实盘账本混用（【新发现】，低优先级）**
+  - 现状：`--date 2026-08-01` 会把历史日的快照/成交写进**真实盘同一账本**，无 `source` 字段区分 → 日报/资金曲线把"回放历史"当"真实发生"。
+  - 改法：`daily_snapshots` 加 `source`（real/replay），`--date` 回放默认 source=replay；日报默认只展示 real（或标注 replay）。
+  - ✅ **v0.12 已落地（2026-08-10）**：`daily_snapshots` 新增 `source` 列（含迁移 + 默认 real）；`add_snapshot` 接受 source 参数；批处理按 `date.date()==今天 → real，历史 → replay` 写入；`get_snapshots` 返回 source。同一天先 replay 后 real 时保留首次标记（ON CONFLICT 不覆盖 source）。测试 `test_snapshot_source_replay_for_history` 等覆盖。日报按 source 过滤留待后续（当前展示全部 + source 可审计）。
+
+- [ ] **PP-8｜标的池分散与轮动——用相关性而非数量决定分散（【低置信探索】，存量未落地）**
+  - 现状：池内仅 510300/588000/159915 三只高度相关宽基（科创50/创业板成长风格高度相关），`max_buy_count=2`；AI 只能在高度相关的池子里"伪选择"。
+  - 问题：池内高相关 → 组合实际分散度低，AI 选哪只都近似；但**扩大池子**的样本对齐/AI 注意力稀释/评测噪声/过拟合风险都很高。故第一步不是加标的，而是**先量化相关性**，用数据决定。
+  - 改法：① 新增 `scripts/corr_analysis.py`：对配置池任意两标的计算 20 日收益滚动相关性，输出矩阵，阈值 ≥0.7 判定"冗余"；② 若确需扩充：优先低相关且数据完整（511010 国债ETF、518880 黄金ETF；需核验 akshare 可用性与复权），保留 `max_buy_count` 并加提示词约束"同类资产最多 1 个"；③ 提示词给每标的加资产类别标签。
+  - 实验设计：池 A=现 3 宽基 vs 池 B=+低相关标的，同引擎同区间；另做"池不变仅改分散约束"的纯提示词对照（隔离混淆变量）。判定：池 B 样本外 Sharpe ≥ 池 A+0.1 **或** max_drawdown 下降 ≥3pp 且收益不劣化；相关性分析先行。
   - 风险与副作用：池子选择 = 特征选择，极易过拟合（样本外确认必须）；引入非权益资产改变"AI 选股"评测语义；数据缺失/复权问题。
-  - 验收：pytest 断言相关性计算函数正确（已知序列）；配置池可动态扩展且缺失标的不崩溃；提示词含资产类别标签。
-
-- [ ] **P2-1｜回测↔真实盘配置一键对齐（【新发现】）**
-  - 现状：回测 A/B 已证明最优配置（`--feature-inject --adjust hfq`），但真实盘默认关闭（A-1 待落地）；且回测 CLI 参数（fill/commission/温度）无法沉淀为可复用的"配置档案"，每次手动传参易漏、易不一致。
-  - 问题：回测证明最优 → 真实盘照搬之间缺少"一键"机制，最优成果落地慢、易配错。
-  - 改法：`config.json` 增加 `backtest_defaults`（fill/commission_mult/adjust/feature_inject/min_confidence）作为回测默认；A-1 落地后真实盘可读同一 `feature_inject` 字段 → 一条 `python run.py` 即与回测最优对齐。
-  - 验收：pytest 断言回测默认从 config 读取；config 改动后无需 CLI 参数即生效。
-
-- [ ] **P2-2｜滑点建模——成交假设再收紧一档（【新发现】）**
-  - 现状：`fill_mode="next_open"` 是"理想次日开盘价"，未含滑点/冲击成本；真实盘 ETF 流动性好但大单仍有冲击。
-  - 问题：next_open 仍偏乐观，收益高估未完全消除。
-  - 改法：`Settings` 加 `slippage_bps`（默认 0），`execute_decisions` 的 `fill_prices` 在买卖侧加滑点（买 +bps、卖 -bps）；`--slippage` CLI 供 A/B。
-  - 实验设计：同区间，next_open × slippage ∈ {0, 5, 10}bps 三档输出指标表，与 PP-1 佣金×2 同口径校验结论稳定性。
-  - 验收：pytest 断言滑点档位改变成交价与收益；结论一致性判定函数覆盖滑点。
+  - 验收：pytest 断言相关性计算函数正确；配置池可动态扩展且缺失标的不崩溃；提示词含资产类别标签。
 
 ---
 
@@ -131,6 +132,9 @@
 - **复权接入回测 + Rank IC 闭环（2026-08-09，落地，保留）**：`Backtester` 加 `adjust` 参数 + CLI `--adjust {none,hfq}`（benchmark 同口径）；`adjfactor.fetch_dividends` 加进程内缓存。**Rank IC 闭环**：`Backtester.run` 内存内收集有效 buy 的 confidence → `compute_forward_returns`（决策日收盘 → 决策日后 20 交易日收盘，无前视）→ `rank_ic`，返回 `rank_ic:{ic,n}` 并入回测输出，`run.py` 打印（n<15 标注"样本不足"）。真实验证：rule 引擎回测 2025-06~2026-08 输出 `Rank IC: +0.000 (n=26)`（rule 置信度恒 0.5→IC=0，管道正确）；复权后基准 +17.56%→+19.58%。测试：`test_v07.py` 5 条。下一步：AI 引擎跑 `--feature-inject --adjust hfq --min-confidence {0.5,0.6,0.7}` A/B（缓存键不含门槛 → 三档只计费一次全量 ≈240 次）。
 - **P1-9 网络硬超时 + IPv6 修复（2026-08-09，落地，保留）**：本机无 IPv6 路由，新浪 DNS 返回前几条全是 IPv6，urllib3 逐条试 IPv6 失败后才轮到 IPv4 → 拉取从 0.5s 恶化到 60s（曾误判为"梯子/断网/锁死"）。修复：`datasource.py` 设 `socket.setdefaulttimeout(15)`（网络半死不再无限挂）+ monkeypatch `socket.getaddrinfo` 对 sina 域名过滤 IPv6 只留 IPv4（实测 60s→0.8s）。
 - **PP-5~PP-8（已核验现状属实，排期）**：止损网格（PP-5）、历史盈亏反馈（PP-6）、政策归档回测（PP-7）、标的池相关性分散（PP-8）——未落地，按"地基先行"原则留待下一轮。
+- **A-1 + A-4（2026-08-10，落地，保留，测试 128 全过）**：A-1 真实盘接入特征注入最优配置（config.json `feature_inject:true`，`--feature-inject` 批处理也生效）；A-4 `_date_type` 拒绝未来日期。⚠️ **但见 N-1：`batch._fetch_and_store` 未传 `adjust`，真实盘特征实为未复权价计算（A-1 只做了一半）**。
+- **A-2/A-3/A-5 + P2-1/P2-2 + B-1/B-2 + B-3（2026-08-10，落地，保留，测试 136 全过）**：A-2 引擎级异常隔离（batch 引擎循环 try/except）；A-3 收盘后 15:00 运行守卫（盘中返回 `before_close`）；A-5 回测默认 end=最近已收盘交易日（`_last_closed_trading_day`）；P2-1 回测默认从 config 读（`fill_mode:next_open` + `adjust:hfq`，Settings 加 `adjust`）；P2-2 滑点建模（`RiskConfig.slippage_bps` + `execute_decisions` 买升卖降 + `--slippage`）；B-1 真实盘 Rank IC 校准闭环（`decisions.forward_return` 列 migration + `_calibrate_forward_returns` 回填 + 日报展示累计 rank_ic）；B-2 日报升级（今日决策明细 + 基准对照 + 数据截至日期，get_snapshots 返回 bar_date）；B-3 市场环境注入（`market_env_inject` 实现默认关，`--market-env` 仅回测生效，A/B 验证后开启——见 N-6）。
+- **N-2 + N-12 + N-4（2026-08-10，落地，保留，测试 143 全过）**：N-2 崩溃遗留 running 不再卡死（`has_batch_run` 只认 done + `begin_batch_run` 同日 running 可重试，崩溃无快照自动补跑）；N-12 `daily_snapshots` 加 `source`（real/replay，历史回放不混入真实账本，含迁移）；N-4 日报新增"按信心分桶胜率"表（0~0.6 / 0.6~0.7 / 0.7+，独立于 IC 门槛有样本即渲染）。测试：`test_v12.py` 7 条 + v0.4 旧测试更新到新语义。N-1（真实盘特征复权，需双 bars）与 N-9（--catch-up）留待下一轮。
 
 ---
 

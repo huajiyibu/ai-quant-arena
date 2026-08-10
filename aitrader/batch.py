@@ -278,8 +278,13 @@ class BatchRunner:
             default=date.date(),
         )
         self.db.save_state(account_id, new_state)
+        source = "real" if date.date() == datetime.now().date() else "replay"
         self.db.add_snapshot(
-            account_id, date, new_state, bar_date=actual_bar_date.strftime("%Y-%m-%d")
+            account_id,
+            date,
+            new_state,
+            bar_date=actual_bar_date.strftime("%Y-%m-%d"),
+            source=source,
         )
         # B-1：回填已满 20 交易日窗口的 buy 决策 forward return（真实盘 Rank IC 校准）
         self._calibrate_forward_returns(account_id, date, bars_map)

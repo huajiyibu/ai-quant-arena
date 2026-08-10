@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS daily_snapshots (
     account_id   INTEGER NOT NULL,
     date         TEXT NOT NULL,
     bar_date     TEXT,
+    source       TEXT DEFAULT 'real',
     cash         REAL NOT NULL,
     total_assets REAL NOT NULL,
     pnl          REAL NOT NULL,
@@ -161,6 +162,8 @@ class Database:
             s_cols = {r[1] for r in conn.execute("PRAGMA table_info(daily_snapshots)").fetchall()}
             if "bar_date" not in s_cols:
                 conn.execute("ALTER TABLE daily_snapshots ADD COLUMN bar_date TEXT")
+            if "source" not in s_cols:
+                conn.execute("ALTER TABLE daily_snapshots ADD COLUMN source TEXT DEFAULT 'real'")
 
     # ---- accounts ----
     def create_account(self, name: str, engine_type: EngineType, initial_capital: float) -> int:
@@ -315,10 +318,10 @@ class Database:
         return [dict(r) for r in rows]
 
     # ---- snapshots ----
-    def add_snapshot(self, account_id: int, date: datetime, state: AccountState, bar_date: str = "") -> None:
+    def add_snapshot(self, account_id: int, date: datetime, state: AccountState, bar_date: str = "", source: str = "real") -> None:
         with self._connect() as conn:
             conn.execute(
-                """INSERT INTO daily_snapshots(account_id, date, bar_date, cash, total_assets, pnl) VALUES(?,?,?,?,?,?)
+                """INSERT INTO daily_snapshots(account_id, date, bar_date, source, cash, total_assets, pnl) VALUES(?,?,?,?,?,?,?)
                    ON CONFLICT(account_id, date) DO UPDATE SET
                      bar_date=excluded.bar_date, cash=excluded.cash,
                      total_assets=excluded.total_assets, pnl=excluded.pnl""",
@@ -326,6 +329,7 @@ class Database:
                     account_id,
                     date.strftime(_DATE_FMT),
                     bar_date or date.strftime(_DATE_FMT),
+                    source,
                     state.cash,
                     state.total_assets,
                     state.total_pnl,
@@ -335,7 +339,7 @@ class Database:
     def get_snapshots(self, account_id: int) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT date, bar_date, cash, total_assets, pnl FROM daily_snapshots "
+                "SELECT date, bar_date, source, cash, total_assets, pnl FROM daily_snapshots "
                 "WHERE account_id=? ORDER BY date",
                 (account_id,),
             ).fetchall()
@@ -373,10 +377,12 @@ class Database:
 
     # ---- batch_runs（防崩溃重跑重复成交的标记） ----
     def begin_batch_run(self, account_id: int, date: datetime) -> None:
-        """标记该账户该日开始运行（崩溃后重跑据此跳过，避免重复成交）"""
+        """标记该账户该日开始运行（N-2：同日 running 允许覆盖重试，done 保留）"""
         with self._connect() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO batch_runs(account_id, date, status, created_at) VALUES(?,?,?,?)",
+                """INSERT INTO batch_runs(account_id, date, status, created_at) VALUES(?,?,?,?)
+                   ON CONFLICT(account_id, date) DO UPDATE SET
+                     created_at=excluded.created_at WHERE status='running'""",
                 (account_id, date.strftime(_DATE_FMT), "running", datetime.now().strftime(_DT_FMT)),
             )
 
@@ -389,10 +395,10 @@ class Database:
             )
 
     def has_batch_run(self, account_id: int, date: datetime) -> bool:
-        """该账户该日是否已有批处理标记（running 或 done）"""
+        """该账户该日是否已完成（N-2：只认 done，running 视为未完成可重跑）"""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM batch_runs WHERE account_id=? AND date=?",
+                "SELECT 1 FROM batch_runs WHERE account_id=? AND date=? AND status='done'",
                 (account_id, date.strftime(_DATE_FMT)),
             ).fetchone()
         return row is not None

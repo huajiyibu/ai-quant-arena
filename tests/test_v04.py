@@ -90,10 +90,14 @@ def test_batch_run_marker_blocks_repeat(tmp_path):
     runner.run(datetime(2024, 1, 26))
     acc = db.get_account_by_engine("rule")
     assert db.has_batch_run(acc["id"], datetime(2024, 1, 26))
-    # 模拟"崩溃未完成"：只 begin 一个新日期，无快照 → 重跑应被标记拦截
-    db.begin_batch_run(acc["id"], datetime(2024, 1, 29))
-    res = runner.run(datetime(2024, 1, 29))
+    # 已完成（done）的日期再跑 → 幂等跳过（防同日重复成交）
+    res = runner.run(datetime(2024, 1, 26))
     assert res["rule"]["skipped"] is True
+    # N-2：崩溃遗留 running + 无快照不再拦截，允许补跑（不再制造假跳过）
+    db.begin_batch_run(acc["id"], datetime(2024, 1, 29))
+    runner.run(datetime(2024, 1, 29))
+    assert db.has_batch_run(acc["id"], datetime(2024, 1, 29))
+    assert len(db.get_snapshots(acc["id"])) == 2
 
 
 # ---------------------------------------------------------------------------
