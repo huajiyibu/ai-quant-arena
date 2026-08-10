@@ -163,11 +163,14 @@ def select_daily_engines(engine_arg: str, engines: dict) -> tuple[dict, list[str
 
 
 def _date_type(s: str) -> datetime:
-    """argparse 日期类型校验：非法值给出友好错误"""
+    """argparse 日期类型校验：非法/未来日期给出友好错误（A-4）"""
     try:
-        return datetime.strptime(s, "%Y-%m-%d")
+        d = datetime.strptime(s, "%Y-%m-%d")
     except ValueError:
         raise argparse.ArgumentTypeError(f"日期格式应为 YYYY-MM-DD，收到: {s!r}")
+    if d.date() > datetime.now().date():
+        raise argparse.ArgumentTypeError(f"日期不能晚于今天，收到: {s!r}")
+    return d
 
 
 def run_backtest(args, settings) -> int:
@@ -389,6 +392,9 @@ def _run(args) -> int:
     settings = load_settings()
     if args.db:
         settings.db_path = Path(args.db)
+    # A-1：--feature-inject 对批处理也生效（真实盘接入最优配置）
+    if args.feature_inject:
+        settings.feature_inject = True
 
     # 回测模式（独立数据库，不走每日账本）
     if args.backtest:
