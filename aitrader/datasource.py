@@ -243,8 +243,14 @@ class PolicySource(Protocol):
 
     name: str
 
-    def fetch_macro_news(self, keywords: list[str], max_items: int) -> list[str]:
-        """拉取宏观政策快讯，按关键词过滤，返回文本列表（最新在前）"""
+    def fetch_macro_news(
+        self,
+        keywords: list[str],
+        max_items: int,
+        decision_date=None,
+        cutoff_time: str = "15:30",
+    ) -> list[str]:
+        """拉取宏观政策快讯：只取决策日当天、不晚于决策时点(cutoff)的，按关键词过滤，最新在前。"""
         ...
 
 
@@ -253,7 +259,19 @@ class AkSharePolicySource:
 
     name = "akshare_cls"
 
-    def fetch_macro_news(self, keywords: list[str], max_items: int) -> list[str]:
+    def fetch_macro_news(
+        self,
+        keywords: list[str],
+        max_items: int,
+        decision_date=None,
+        cutoff_time: str = "15:30",
+    ) -> list[str]:
+        """拉取宏观政策快讯：只取决策日当天、且不晚于决策时点（cutoff）的消息。
+
+        - 过滤 发布日期==decision_date：避免周一把上周旧闻当"今日政策"（治滞后 F-6）
+        - 过滤 发布时间<=cutoff：避免用收盘后消息 justify 收盘价成交（治前视 F-7）
+        - 倒序遍历取最新匹配
+        """
         from .util import retry_call
 
         import akshare as ak  # 延迟导入，便于 mock
@@ -262,8 +280,17 @@ class AkSharePolicySource:
         if df is None or df.empty:
             return []
 
+        # F-6/F-7：按决策日 + 决策时点过滤（接口自带 发布日期/发布时间 两列）
+        if {"发布日期", "发布时间"}.issubset(df.columns):
+            if decision_date is not None:
+                df = df[df["发布日期"] == decision_date]
+            df = df[df["发布时间"].astype(str).str[:5] <= cutoff_time]
+        if df.empty:
+            return []
+
         items: list[str] = []
-        for row in df.itertuples():
+        # 接口内部按发布时间升序 → 倒序遍历取最新匹配优先
+        for row in df.iloc[::-1].itertuples():
             title = str(row.标题)
             content = str(row.内容)
             text = f"{title}｜{content}"
@@ -282,5 +309,11 @@ class FakePolicySource:
     def __init__(self, news: list[str]) -> None:
         self.news = news
 
-    def fetch_macro_news(self, keywords: list[str], max_items: int) -> list[str]:
+    def fetch_macro_news(
+        self,
+        keywords: list[str],
+        max_items: int,
+        decision_date=None,
+        cutoff_time: str = "15:30",
+    ) -> list[str]:
         return [n for n in self.news if any(k in n for k in keywords)][:max_items]

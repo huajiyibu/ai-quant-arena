@@ -61,7 +61,7 @@ class BatchRunner:
 
         # 1. 拉宏观政策（仅当存在政策版引擎时；只跑 rule 时跳过，避免浪费与噪音）
         if any(getattr(e, "include_policy", False) for e in self.engines.values()):
-            self._policy_text = self._fetch_policy()
+            self._policy_text = self._fetch_policy(date)
         else:
             self._policy_text = ""
 
@@ -71,23 +71,19 @@ class BatchRunner:
             logger.error("行情拉取失败: %s，当日跳过交易（避免静默坏数据）", failed)
             return {"_warning": f"bar_fetch_failed:{','.join(failed)}"}
 
-        # 2.1 数据新鲜度守卫：逐标的检查——严重陈旧的标的不参与当日成交/估值（剔除并告警）；
-        #     全部陈旧则当日跳过，避免用旧价制造"当日"假快照（容忍 1~2 个自然日的 T+1 滞后）
-        STALE_DAYS = 5
-        fresh: dict[str, list] = {}
+        # 2.1 数据时点硬校验（F-1/F-2）：参与标的最新 bar 必须截至决策日。
+        #     实时补全失败/缺失 → 剔除该标的并告警，杜绝"用昨日价做今日决策+估值"的静默慢一拍。
         stale_symbols: list[str] = []
+        fresh: dict[str, list] = {}
         for sym, bars in bars_map.items():
-            if not bars:
-                continue
-            d = bars[-1].datetime.date()
-            if (date.date() - d).days > STALE_DAYS:
+            if not bars or bars[-1].datetime.date() != date.date():
                 stale_symbols.append(sym)
             else:
                 fresh[sym] = bars
         if stale_symbols:
-            logger.error("以下标的数据陈旧已剔除（>%d 天）：%s", STALE_DAYS, stale_symbols)
+            logger.error("以下标的数据非决策日，已剔除不参与当日交易/估值：%s", stale_symbols)
         if not fresh:
-            logger.error("全部标的数据陈旧，当日跳过交易")
+            logger.error("全部标的数据非决策日，当日跳过交易")
             return {"_warning": f"stale_bars:{','.join(stale_symbols)}"}
         bars_map = fresh
 
@@ -98,14 +94,16 @@ class BatchRunner:
         return results
 
     # ------------------------------------------------------------------
-    def _fetch_policy(self) -> str:
-        """拉取并过滤宏观政策快讯（异常时降级为空）"""
+    def _fetch_policy(self, date: datetime) -> str:
+        """拉取并过滤宏观政策快讯：只取决策日当天、不晚于 15:30 的消息（去滞后+去前视）。"""
         if not self.policy_source or not self.settings.policy.enabled:
             return ""
         try:
             news = self.policy_source.fetch_macro_news(
                 self.settings.policy.keywords,
                 self.settings.policy.max_items,
+                decision_date=date.date(),
+                cutoff_time="15:30",
             )
             if news:
                 logger.info("已获取 %d 条宏观政策快讯", len(news))
@@ -220,9 +218,15 @@ class BatchRunner:
         for sym, res in exec_results.items():
             self.db.update_decision_execution(account_id, date, sym, res)
 
-        # 保存状态 + 快照（记录 bar_date 供审计）
+        # 保存状态 + 快照（记录实际 bar_date 供审计；正常情况下=决策日）
+        actual_bar_date = max(
+            (b[-1].datetime.date() for b in bars_map.values() if b),
+            default=date.date(),
+        )
         self.db.save_state(account_id, new_state)
-        self.db.add_snapshot(account_id, date, new_state, bar_date=date.strftime("%Y-%m-%d"))
+        self.db.add_snapshot(
+            account_id, date, new_state, bar_date=actual_bar_date.strftime("%Y-%m-%d")
+        )
         self.db.complete_batch_run(account_id, date)
 
         return {
