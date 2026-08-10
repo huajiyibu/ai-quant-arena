@@ -98,6 +98,13 @@ class AkShareDataSource:
                     volume=float(row.volume),
                 )
             )
+        # 当日行情补全：新浪历史接口滞后约 1 个交易日。历史最新早于目标日时尝试补实时；
+        # 实时接口只返回"今天"，日期不匹配（如回测 end_date 为过去日）则自然不补，安全。
+        ref_date = end_date.date() if end_date is not None else datetime.now().date()
+        if bars and bars[-1].datetime.date() < ref_date:
+            rt = self._fetch_realtime(symbol, exchange)
+            if rt is not None and rt.datetime.date() == ref_date:
+                bars.append(rt)
         # 可选后复权式调整（消除除权跳空；拉取失败降级为原始行情）
         if adjust == "hfq":
             from .adjfactor import compute_adjusted_bars, fetch_dividends
@@ -108,6 +115,40 @@ class AkShareDataSource:
             except Exception:
                 logger.warning("复权因子获取失败，返回原始行情: %s", symbol)
         return bars
+
+    def _fetch_realtime(self, symbol: str, exchange: str) -> Bar | None:
+        """拉当日实时行情（新浪 hq.sinajs.cn，需 Referer），构造一根日 K 线。
+
+        新浪历史接口 fund_etf_hist_sina 滞后约 1 个交易日（实测周一仍停在上周五），
+        真实运行时用实时接口补当日 K 线（收盘后调用 close≈当日收盘价）。失败返回 None，
+        上层降级为仅用历史数据。
+        """
+        import requests
+
+        prefix = self._EXCHANGE_PREFIX.get(exchange.upper(), "sh")
+        try:
+            r = requests.get(
+                f"https://hq.sinajs.cn/list={prefix}{symbol}",
+                headers={"Referer": "https://finance.sina.com.cn/"},
+                timeout=10,
+            )
+            r.encoding = "gbk"
+            text = r.text
+            if '"' not in text:
+                return None
+            fields = text.split('"')[1].split(",")
+            # 0名称 1今开 2昨收 3当前 4最高 5最低 8成交量(股) 30日期 31时间
+            if len(fields) < 32 or not fields[30].strip():
+                return None
+            date = datetime.strptime(fields[30].strip(), "%Y-%m-%d")
+            open_, high, low, close = (float(fields[i]) for i in (1, 4, 5, 3))
+            volume = float(fields[8])
+            if close <= 0:
+                return None
+            return Bar(symbol, date, open_, high, low, close, volume)
+        except Exception:
+            logger.warning("实时行情获取失败: %s", symbol)
+            return None
 
     def is_trading_day(self, date: datetime) -> bool:
         """判断某日是否为 A 股交易日；交易日历不可用（无网络）时降级为仅跳过周末"""
