@@ -25,6 +25,9 @@ class DecisionContext:
     # N-1：特征计算专用复权 K 线（估值/成交/价格展示仍用 bars 原始价）。
     # 为 None 时引擎回退用 bars（回测全链路 hfq，bars 本身即复权价，天然一致）。
     adjusted_bars: dict[str, list[Bar]] | None = None
+    # PP-6：历史盈亏反馈（近 N 笔已平仓交易明细，喂模型复盘；feedback_n=0 关闭）
+    recent_closed_trades: list[dict] = field(default_factory=list)
+    feedback_n: int = 0
 
 
 @dataclass

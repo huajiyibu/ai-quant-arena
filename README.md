@@ -107,7 +107,9 @@ python run.py --backtest --benchmark 510300                     # 指定基准�
 ## 成交与配置口径
 
 - **成交时点**：真实盘按**决策日收盘价**成交（每日 15:30 决策后按当日收盘结算，滑点默认 0）；回测的 `fill_mode: next_open`（次日开盘成交）+ `slippage` 是**更严苛**的假设，因此真实盘表现不应优于回测。该说明同时写入 `data/last_run.json` 的 `fill_note` 字段。
-- **市场环境注入（B-3）**：`config.json` 的 `market_env_inject` 默认 `false`——该特性**未经 A/B 验证**，保持默认关闭，不建议在真实盘开启。
+- **市场环境注入（B-3）**：`config.json` 的 `market_env_inject` 已开启——A/B 验证（2025-06~2026-08）：夏普 0.98→1.57、回撤 10.0%→2.9%，**更稳但绝对收益略降**。回测可用 `--market-env` 关闭做对照。
+- **历史盈亏反馈（PP-6）**：`--feedback N` 让模型参考近 N 笔已平仓交易复盘（A/B：夏普提升但收益下降、换手升高；默认关，可按需开启）。
+- **止损/止盈（PP-5）**：`RiskConfig.stop_loss_pct` / `take_profit_pct` 默认 0（关）——rule 网格（2021-2024，12 组合）显示无组合同时改善夏普与回撤，**按规则保留无止损为默认**。
 - **通知（N-10）**：`config.json` 的 `notify` 块默认关闭；填入 `webhook_url`（Server酱/通用 webhook）并设 `enabled: true` 后，批处理失败 / 连续无成交 / 净值回撤超阈值会推送告警（推送失败不阻塞主流程）。
 - **补跑（N-9）**：`python run.py --catch-up` 可从最近快照次日补齐缺失交易日（幂等，不重复成交）。
 

@@ -56,13 +56,16 @@
   - 验收：pytest 断言标签解析与聚合正确；未带标签的 reason 归入"其他"不崩溃。
 
 - [x] **N-6｜B-3 市场环境注入"落地一半"：已实现但从未 A/B，真实盘也没接线（【新发现】）**
-  - ✅ **v0.14 已接线（2026-08-11，A/B 验证仍待做）**：`--market-env` 对批处理也生效（与 feature-inject 对称）；config.json 暴露 `market_env_inject:false`（默认关）。**仍未做 A/B（需烧 API 成本），保持默认关，README 标注"未验证"**。
+  - ✅ **v0.14 已接线（2026-08-11）**：`--market-env` 对批处理也生效（与 feature-inject 对称）；config.json 暴露 `market_env_inject:false`（默认关）。
+  - ✅ **A/B 结论（2026-08-11，AI 特征+复权，2025-06~2026-08）**：基线（无环境）**+13.40%/夏普0.98/回撤10.04%/4笔** vs +市场环境 **+9.52%/夏普1.57/回撤2.86%/7笔**。**满足开启标准（夏普≥基线+0.1）**：收益略降（-3.9pp）但回撤大减（-7.2pp）、夏普+0.59。⚠️ 样本少（7笔），置信度有限；真实盘为"更稳而非更赚"，取舍见本轮实验结论。
   - 现状：`_format_market_env` 纯函数已实现且有单测，`Settings.market_env_inject` 默认 False、config.json 无字段、`--market-env` 只在回测分支生效、批处理不读。
   - 问题：一个"可能有用也可能有害"的提示词特性挂在中途——既没被验证（无 A/B 结论），又无法在真实盘开启。
   - 改法：① 先做小样本回测 A/B（A=现状 vs B=+市场环境行，同 system/特征/复权，同区间，≈几百次 API 一次计费）出结论；② 若 B 样本外 Sharpe ≥ A+0.1 再在 config 暴露 `market_env_inject` 给真实盘，否则按"无增量"如实记录并保持默认关。
   - 验收：pytest 断言 prompt 含/不含市场环境行受开关控制（已有）；A/B 结论写入本文档。
 
-- [ ] **PP-5｜止损/止盈/回撤熔断网格——诚实检验"止损是否真的帮 AI"（【低置信探索】，存量未落地）**
+- [x] **PP-5｜止损/止盈/回撤熔断网格——诚实检验"止损是否真的帮 AI"（【低置信探索】，存量未落地）**
+  - ✅ **v0.15 已落地（2026-08-11）**：`portfolio.apply_stop_rules`（现价≤成本×(1-止损) → 强制整仓卖 `[stop_loss]`；≥成本×(1+止盈) → 强制卖 `[take_profit]`，先于模型决策执行）；`RiskConfig.stop_loss_pct/take_profit_pct`（默认 0 关）；batch/backtest 执行链接入；CLI `--stop-loss/--take-profit`；网格脚本 `scripts/stop_grid.py`（独立 db，rule 免费 / AI 精简档）。测试 `test_v15.py` 4 条。
+  - ✅ **网格结论（2026-08-11，rule 引擎 2021-01~2024-12，12 组合）**：**无组合同时满足"夏普≥基线+0.1 且 回撤下降≥3pp"→ 按规则保留"无止损"为默认**。观察：止损各档对 rule 收益/回撤几乎无改善（趋势跟随风格，账户级回撤 20% 不因单笔止损而变）；止盈 20% 档收益明显改善（-5.7%→+4.6%）、夏普 -0.06→0.15，但回撤无下降、不满足双条件。⚠️ rule 在 2021-2024 本身跑输（震荡市），结论仅对 rule 有效；AI 止损网格（需烧 API，且止损触发会分叉计费）未做，标注为可选后续。
   - 现状：`risk.py::validate_buy`、`portfolio.py::execute_decisions` 均无止损/止盈/回撤熔断；sell 完全由模型决定；`RiskConfig` 无相关参数（IMPROVEMENTS P1-5 已立项未落地）。
   - 问题：AI 卖出滞后于价格（只在决策日表态），单边下跌可能死扛到深亏；**但止损对无固定趋势风格的 AI 是双刃剑**——固定止损可能在正常回调被迫离场、趋势恢复后再追高，形成"割肉+追高"双边损耗。**故绝不默认止损有用，必须网格实测**；回撤熔断（账户级冷却）相对安全。
   - 改法：① `RiskConfig` 加 `stop_loss_pct=0.0`（0=关闭）、`take_profit_pct=0.0`、`max_drawdown_halt=0.0`、`halt_cooldown_days=5`；② 新增 `portfolio.py::apply_stop_rules(state, prices, risk, date) -> (state, forced_trades, halted)` 纯函数：持仓现价 ≤ 成本×(1-止损) → 强制整仓卖；≥ 成本×(1+止盈) → 止盈；账户回撤 ≥ 熔断 → 全部清仓 + 冷却标记（`batch._run_engine` 与 `backtest` 回放循环读冷却态，强制 hold N 日）；③ 在 `execute_decisions` 之前调用。
@@ -70,7 +73,9 @@
   - 风险与副作用：网格最优易过拟合（需留样本外）；止损+佣金在震荡市双杀；冷却期可能错过反弹。改动集中在 risk/portfolio 纯函数，schema 无变化。
   - 验收：pytest 断言触发止损生成强制 sell 成交且 reason 含 `[stop_loss]`；冷却期内引擎决策被替换为 hold；网格实验脚本输出全组合指标表并标注最优，供人审阅而非自动采纳。
 
-- [ ] **PP-6｜历史交易盈亏反馈——让 AI 学会"复盘"（【低置信探索】，存量未落地）**
+- [x] **PP-6｜历史交易盈亏反馈——让 AI 学会"复盘"（【低置信探索】，存量未落地）**
+  - ✅ **v0.15 已落地（2026-08-11）**：`attribution.closed_trade_pairs`（FIFO 配对已平仓明细，兼容 dict/Trade）；`DecisionContext.recent_closed_trades` + `feedback_n`（默认 0 关）；`DeepSeekEngine._build_prompt` 复盘节（近 N 笔已平仓：symbol/买卖日/价/盈亏/当时理由，仅实际成交、无前视）；`batch`/`backtest` 各自注入；CLI `--feedback N`。测试 `test_v15.py` 9 条。
+  - ✅ **A/B 结论（2026-08-11，AI 特征+复权，2025-06~2026-08）**：基线（无反馈）**+13.40%/夏普0.98/回撤10.04%/4笔** vs +反馈5笔 **+10.34%/夏普1.45/回撤4.34%/11笔**。**满足提升标准**：成交更活跃（4→11笔）、夏普+0.47、回撤减半（-5.7pp）、收益略降。⚠️ 样本少（11笔），置信度有限。
   - 现状：`deepseek.py::_build_prompt` 只含当前持仓成本与浮盈，无历史已平仓交易及盈亏；模型每次决策"失忆"，重复追高/死扛模式无法自我纠正。
   - 问题：无行为反馈 = 模型在"无记忆的重复试错"。注入"近 N 笔已平仓交易 + 盈亏 + 当时理由"，让模型建立"行为→结果"关联，可抑制重复犯错；数据已在 trades 表，边际成本低。
   - 改法：① `_build_prompt` 追加"近期已平仓交易（复盘参考）"：取近 `feedback_n`（默认 5）笔**已平仓**（有 sell）的 (symbol, buy日期/价, sell日期/价, pnl_pct, buy_reason) 倒序；② `DecisionContext` 增加 `recent_closed_trades: list[dict]`（`batch._run_engine` / `backtest` 各自注入）；③ 缓存键自动含该节（prompt 变化）→ 不串缓存；④ 铁律：只取**实际成交** trades，不含被风控拒绝/未成交的决策。
@@ -145,6 +150,7 @@
 - **N-2 + N-12 + N-4（2026-08-10，落地，保留，测试 143 全过）**：N-2 崩溃遗留 running 不再卡死（`has_batch_run` 只认 done + `begin_batch_run` 同日 running 可重试，崩溃无快照自动补跑）；N-12 `daily_snapshots` 加 `source`（real/replay，历史回放不混入真实账本，含迁移）；N-4 日报新增"按信心分桶胜率"表（0~0.6 / 0.6~0.7 / 0.7+，独立于 IC 门槛有样本即渲染）。测试：`test_v12.py` 7 条 + v0.4 旧测试更新到新语义。N-1（真实盘特征复权，需双 bars）与 N-9（--catch-up）留待下一轮。
 - **N-1（2026-08-11，落地，保留，测试 149 全过）**：真实盘特征复权——双 bars 方案。`batch._fetch_and_store` 返回三元组（原始 bars_map / 复权 adjusted_map / failed），`_adjusted_bars_map` 本地用 `compute_adjusted_bars` + 分红缓存生成复权（零额外网络，失败降级原始）；`DecisionContext.adjusted_bars` 字段；`DeepSeekEngine._feature_bars` 特征（feature_inject + market_env）优先复权、估值/成交/价格展示保持原始；`_calibrate_forward_returns` 改复权价回填（含分红，与回测 hfq 一致）。由此真实盘与回测"看到同一个世界"：除权日特征不再假跳变。测试：`test_v13.py` 6 条（特征优先级/回退/prompt 特征复权价+价格展示原始/batch 双 bars 传递/分红失败降级/fwd 含分红）。注：实现时发现 N-1 核心代码在上轮（v0.12 之后、未提交）已在工作区写好，本轮补测试、修 `_feature_bars` 空列表回退瑕疵、验收并提交为 v0.13。
 - **N-3/N-5/N-6/N-8/N-9/N-10/N-11（2026-08-11，落地，保留，测试 161 全过）**：一次性收尾剩余工程项。N-3 `last_run.json` 加 `fill_note` 成交口径说明；N-5 新增 `aitrader/attribution.py`（reason 标签解析 + 按标签聚合已平仓配对盈亏）+ 提示词要求 [趋势/回调/政策/超买/超卖/其他] 标签 + 日报"归因复盘"表；N-6 `--market-env` 批处理接线 + config 暴露（默认关，未 A/B 保持关）；N-8 `DeepSeekEngine.api_calls/cache_hits` 记账 + `last_run.api_stats`；N-9 `--catch-up [N]` 补跑缺失交易日（幂等）；N-10 新增 `aitrader/notify.py`（check_alerts 失败/无成交/回撤 + send_notify 推送失败不阻塞）+ config.notify（默认关）；N-11 主源失败回退 `bars` 表缓存兜底（容灾，当日新鲜度仍硬校验，不造假；"缓存提速"评估风险 > 收益明确不做）。测试：`test_v14.py` 12 条。
+- **🔥 v0.15 烧 API 实验（2026-08-11，测试 170 全过，已推送）**：用户授权烧 API，落地 PP-5/PP-6/PP-8 代码 + 跑 N-6/PP-6/PP-5 A/B。**免费**：PP-8 相关性（510300-588000=0.75、510300-159915=0.87、588000-159915=0.82，全>0.7 → 池内高度冗余）；PP-6 代码（feedback_n 默认0关 + 复盘节 + batch/backtest 注入）；PP-5 代码（apply_stop_rules + RiskConfig + 网格脚本）。**烧 API（AI 特征+复权 2025-06~2026-08，v0.14 改 system 后缓存全失效全量计费 ≈3×280 次）**：①基线 +13.40%/夏普0.98/回撤10.04%/4笔（注：比 v0.7 的 +21.70% 低，因 v0.14 改 system 加 reason 标签→模型更保守）；②N-6 +市场环境 +9.52%/夏普1.57/回撤2.86%/7笔 → **满足开启标准，config.json market_env_inject 已置 true**（更稳：回撤大减、夏普大幅提升；收益略降）；③PP-6 +反馈5笔 +10.34%/夏普1.45/回撤4.34%/11笔 → 满足提升标准但收益降更多+换手 1.75 偏高，**标注为可选项（feedback_n 默认仍 0）**。④PP-5 rule 网格 12 组合（2021-2024）：**无组合同时满足"夏普+0.1 且回撤-3pp"→ 保留无止损默认**（止盈 20% 改善收益但回撤无降）。**共同模式：加辅助信息→降绝对收益但改善风险调整表现；样本少（4-11笔）置信度有限，真实盘继续观察积累样本**。
 
 ---
 

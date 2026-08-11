@@ -12,12 +12,13 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 
+from .attribution import closed_trade_pairs
 from .config import Settings
 from .database import Database
 from .datasource import DataSource
 from .engines.base import DecisionContext, DecisionEngine, EngineResult
 from .models import AccountState, Bar, Decision
-from .portfolio import execute_decisions, refresh_prices
+from .portfolio import apply_stop_rules, execute_decisions, refresh_prices
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +273,7 @@ class Backtester:
         self.record_decisions = record_decisions
         self.fill_mode = fill_mode
         self.adjust = adjust
+        self._trades_so_far: list = []  # PP-6：已累计的成交流水（供复盘注入）
 
     def run(self) -> dict:
         """逐日回放，返回 {account_id, snapshots, trades, metrics}"""
@@ -351,6 +353,10 @@ class Backtester:
                 symbol_names=names,
                 lookback=lookback,
                 policy_text="",  # 回测不注入当下政策，保证评价一致性
+                recent_closed_trades=closed_trade_pairs(
+                    self._trades_so_far, max_items=self.settings.feedback_n or 5
+                ),
+                feedback_n=self.settings.feedback_n,
             )
             try:
                 result = self.engine.decide(ctx)
@@ -372,15 +378,18 @@ class Backtester:
                 if dec.action == "buy" and dec.valid and dec.symbol in names:
                     buys.append((day, dec.symbol, dec.confidence))
 
+            # PP-5：止损/止盈强制卖出（先于模型决策执行）
+            forced = apply_stop_rules(state, prices, self.settings.risk)
             new_state, trades, _ = execute_decisions(
                 state,
-                result.decisions,
+                forced + result.decisions,
                 prices,
                 names,
                 self.settings.risk,
                 day,
                 fill_prices=fill_prices or None,
             )
+            self._trades_so_far.extend(trades)
             for t in trades:
                 self.db.add_trade(account_id, t)
             if self.record_decisions:

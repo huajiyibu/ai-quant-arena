@@ -105,6 +105,7 @@ def build_engines(settings, response_cache: dict | None = None) -> dict[str, Dec
             system_prompt_extra=settings.system_prompt_extra,
             feature_inject=settings.feature_inject,
             market_env_inject=settings.market_env_inject,
+            feedback_n=settings.feedback_n,
             response_cache=response_cache,
         )
         engines["ai_policy"] = DeepSeekEngine(
@@ -119,6 +120,7 @@ def build_engines(settings, response_cache: dict | None = None) -> dict[str, Dec
             system_prompt_extra=settings.system_prompt_extra,
             feature_inject=settings.feature_inject,
             market_env_inject=settings.market_env_inject,
+            feedback_n=settings.feedback_n,
             response_cache=response_cache,
         )
     return engines
@@ -247,6 +249,12 @@ def run_backtest(args, settings) -> int:
         settings.feature_inject = True
     if args.market_env:
         settings.market_env_inject = True
+    if args.feedback is not None:
+        settings.feedback_n = args.feedback
+    if args.stop_loss is not None:
+        settings.risk.stop_loss_pct = args.stop_loss
+    if args.take_profit is not None:
+        settings.risk.take_profit_pct = args.take_profit
 
     # 明确请求 AI 引擎但未配置 key：直接报错，避免静默降级 rule 导致误读结果
     if args.engine in ("ai", "ai_policy") and not settings.api_key:
@@ -420,6 +428,18 @@ def main(argv: list[str] | None = None) -> int:
         help="滑点（bps，买卖双边；默认 0，A/B 用，P2-2）",
     )
     parser.add_argument(
+        "--stop-loss",
+        type=float,
+        default=None,
+        help="止损阈值（0~0.5，如 0.08=跌8%强制卖出；默认0关，PP-5）",
+    )
+    parser.add_argument(
+        "--take-profit",
+        type=float,
+        default=None,
+        help="止盈阈值（0~1.0，如 0.2=涨20%强制卖出；默认0关，PP-5）",
+    )
+    parser.add_argument(
         "--adjust",
         choices=["none", "hfq"],
         default=None,
@@ -434,6 +454,12 @@ def main(argv: list[str] | None = None) -> int:
         "--market-env",
         action="store_true",
         help="提示词注入市场环境（B-3，探索性，默认关）",
+    )
+    parser.add_argument(
+        "--feedback",
+        type=int,
+        default=None,
+        help="历史盈亏反馈笔数（0=关，N=最近N笔已平仓交易，PP-6；A/B 实验用）",
     )
     args = parser.parse_args(argv)
 

@@ -15,7 +15,7 @@ from .database import Database
 from .datasource import DataSource, PolicySource
 from .engines.base import DecisionContext, DecisionEngine, EngineResult
 from .models import AccountState, Bar, Decision, EngineType
-from .portfolio import execute_decisions, refresh_prices
+from .portfolio import apply_stop_rules, execute_decisions, refresh_prices
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,16 @@ class BatchRunner:
         except Exception:
             logger.exception("宏观政策快讯获取失败，本次不参考政策")
             return ""
+
+    def _closed_trades(self, account_id: int) -> list[dict]:
+        """PP-6：该账户最近已平仓交易明细（供引擎复盘；feedback_n=0 时为空）。"""
+        if not self.settings.feedback_n:
+            return []
+        from .attribution import closed_trade_pairs
+
+        return closed_trade_pairs(
+            self.db.get_trades(account_id), max_items=self.settings.feedback_n
+        )
 
     def _calibrate_forward_returns(
         self, account_id: int, date: datetime, bars_map: dict
@@ -288,6 +298,8 @@ class BatchRunner:
             lookback=self.settings.lookback_days,
             policy_text=policy_text,
             adjusted_bars=adjusted_bars_map,
+            recent_closed_trades=self._closed_trades(account_id),
+            feedback_n=self.settings.feedback_n,
         )
         result: EngineResult = EngineResult()
         try:
@@ -311,8 +323,10 @@ class BatchRunner:
         # 风控 + 执行 + 记账（先标记"运行中"，崩溃后重跑不重复成交）
         self.db.begin_batch_run(account_id, date)
         names = self.settings.symbol_names
+        # PP-5：止损/止盈强制卖出（先于模型决策执行，reason 带 [stop_loss]/[take_profit] 标签）
+        forced = apply_stop_rules(state, prices, self.settings.risk)
         new_state, trades, exec_results = execute_decisions(
-            state, result.decisions, prices, names, self.settings.risk, date
+            state, forced + result.decisions, prices, names, self.settings.risk, date
         )
         for trade in trades:
             self.db.add_trade(account_id, trade)

@@ -54,3 +54,52 @@ def attribute_trades(trades: list[dict]) -> dict[str, dict]:
     for a in agg.values():
         a["win_rate"] = a["win"] / a["n"] if a["n"] else 0.0
     return agg
+
+
+def closed_trade_pairs(trades: list, max_items: int = 5) -> list[dict]:
+    """返回最近已平仓配对明细（PP-6 历史盈亏反馈用）。
+
+    Args:
+        trades: database.get_trades（dict）或 execute_decisions 返回（Trade 对象）
+        max_items: 返回最近几笔（按 sell 日期倒序）
+
+    Returns:
+        [{"symbol", "buy_date", "buy_price", "sell_date", "sell_price", "pnl_pct", "reason"}, ...]
+        只含实际成交的 buy→sell 配对；未平仓不计入。
+    """
+
+    def _f(t, key):
+        return t[key] if isinstance(t, dict) else getattr(t, key, "")
+
+    def _d(v):
+        return v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v)
+
+    by_sym: dict[str, list] = {}
+    for t in trades:
+        by_sym.setdefault(_f(t, "symbol"), []).append(t)
+
+    pairs: list[dict] = []
+    for ts in by_sym.values():
+        sorted_ts = sorted(ts, key=lambda x: _f(x, "date"))
+        open_buys: list = []
+        for t in sorted_ts:
+            if _f(t, "action") == "buy":
+                open_buys.append(t)
+            elif _f(t, "action") == "sell" and open_buys:
+                b = open_buys.pop(0)  # FIFO 配对
+                b_price = _f(b, "price")
+                s_price = _f(t, "price")
+                pnl_pct = s_price / b_price - 1 if b_price > 0 else 0.0
+                pairs.append(
+                    {
+                        "symbol": _f(t, "symbol"),
+                        "buy_date": _d(_f(b, "date")),
+                        "buy_price": b_price,
+                        "sell_date": _d(_f(t, "date")),
+                        "sell_price": s_price,
+                        "pnl_pct": pnl_pct,
+                        "reason": _f(b, "reason"),
+                    }
+                )
+    pairs.sort(key=lambda p: p["sell_date"], reverse=True)
+    return pairs[:max_items]

@@ -40,6 +40,7 @@ class DeepSeekEngine(DecisionEngine):
         system_prompt_extra: str = "",
         feature_inject: bool = False,
         market_env_inject: bool = False,
+        feedback_n: int = 0,
     ) -> None:
         import requests  # 延迟导入，便于测试时替换
 
@@ -55,6 +56,7 @@ class DeepSeekEngine(DecisionEngine):
         self.system_prompt_extra = system_prompt_extra
         self.feature_inject = feature_inject
         self.market_env_inject = market_env_inject
+        self.feedback_n = feedback_n  # PP-6：历史盈亏反馈笔数（0=关闭）
         # 响应缓存：以 (model, prompt) 为键（prompt 已完整编码决策输入；
         # ai 与 ai_policy 提示词相同时共享缓存，避免回测重复计费）
         self._cache = response_cache
@@ -170,6 +172,16 @@ class DeepSeekEngine(DecisionEngine):
             lines.append("当前持仓:\n" + "\n".join(pos_lines))
         else:
             lines.append("当前持仓: 空仓")
+
+        # PP-6：历史盈亏反馈（近 N 笔已平仓交易复盘；只含实际成交，无前视）
+        if self.feedback_n > 0 and ctx.recent_closed_trades:
+            lines.append("近期已平仓交易（复盘参考，从结果学习，避免重复犯错）：")
+            for p in ctx.recent_closed_trades[: self.feedback_n]:
+                lines.append(
+                    f"  {p['symbol']} 买{p['buy_date']}@{p['buy_price']:.3f} "
+                    f"卖{p['sell_date']}@{p['sell_price']:.3f} "
+                    f"盈亏{p['pnl_pct']:+.1%} 当时理由:{str(p['reason'])[:24]}"
+                )
 
         if self.include_policy and ctx.policy_text:
             lines.append(

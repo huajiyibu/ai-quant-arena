@@ -4,7 +4,7 @@ AccountState 不可变，apply_trade / refresh_prices 返回新状态，便于�
 """
 from __future__ import annotations
 
-from .models import AccountState, Position, Trade
+from .models import AccountState, Decision, Position, Trade
 
 
 def apply_trade(state: AccountState, trade: Trade) -> AccountState:
@@ -64,6 +64,30 @@ def refresh_prices(state: AccountState, prices: dict[str, float]) -> AccountStat
         cash=state.cash,
         positions=positions,
     )
+
+
+def apply_stop_rules(
+    state: AccountState, prices: dict[str, float], risk: RiskConfig
+) -> list[Decision]:
+    """PP-5：止损/止盈强制卖出（纯函数）。
+
+    现价 ≤ 成本×(1-止损) → 整仓止损卖出；现价 ≥ 成本×(1+止盈) → 整仓止盈卖出。
+    返回强制卖出决策列表（reason 带 [stop_loss]/[take_profit] 标签供归因）；
+    无持仓或对应阈值=0 时返回空。在 execute_decisions 之前调用，强制卖出先于模型决策执行。
+    """
+    forced: list[Decision] = []
+    if not state.positions:
+        return forced
+    for sym, p in state.positions.items():
+        price = prices.get(sym)
+        if not price or p.cost_price <= 0:
+            continue
+        pnl_pct = price / p.cost_price - 1
+        if risk.stop_loss_pct > 0 and price <= p.cost_price * (1 - risk.stop_loss_pct):
+            forced.append(Decision(sym, "sell", reason=f"[stop_loss] 止损 {pnl_pct:+.1%}"))
+        elif risk.take_profit_pct > 0 and price >= p.cost_price * (1 + risk.take_profit_pct):
+            forced.append(Decision(sym, "sell", reason=f"[take_profit] 止盈 {pnl_pct:+.1%}"))
+    return forced
 
 
 def execute_decisions(
