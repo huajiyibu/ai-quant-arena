@@ -20,10 +20,11 @@
 
 ### P0（真实盘口径一致性 / 无人值守可靠性，建议最先处理）
 
-- [ ] **N-1｜真实盘特征注入用的是未复权行情——A-1 只做了一半（【新发现】）**
+- [x] **N-1｜真实盘特征注入用的是未复权行情——A-1 只做了一半（【新发现】）**
   - 现状：`config.json` 已 `feature_inject:true` + `adjust:"hfq"`，回测走 `adjust=hfq`；但 `batch.py::_fetch_and_store` 调 `fetch_daily_bars` 时**没有传 `adjust`** → 真实盘喂给 `compute_features` 的 bars 是**未复权原始价**。
   - 问题：除权日价格跳空会让 MA/RSI/距高/动量等特征失真（与回测口径不一致）；A-1 原意"特征用复权价、估值/成交用原始价"只实现了一半——用户以为真实盘跑的是 A/B 最优配置，实际是"特征失真版"。
   - 改法：批处理对每个标的拉复权价（复用 `adjust="hfq"`）专供特征计算，估值/成交仍用原始价（batch 内部对 bars 做 `compute_adjusted_bars` 算特征，再传原始价给估值/成交即可）；口径差异写进 README。
+  - ✅ **v0.13 已落地（2026-08-11，双 bars 方案）**：`batch._fetch_and_store` 返回 `(bars_map 原始, adjusted_map 复权, failed)`；新增 `_adjusted_bars_map`（本地 `compute_adjusted_bars` + 分红缓存生成复权，**零额外网络**，失败降级原始不中断）；`DecisionContext` 新增 `adjusted_bars` 字段；`DeepSeekEngine._feature_bars` 优先复权算特征（feature_inject + market_env），缺失/为空回退原始；**估值/成交/价格展示仍用 `bars` 原始价**；`_calibrate_forward_returns` 改用复权价回填（含分红口径，与回测 hfq 一致）。实现说明：真实盘 `fetch_daily_bars` 历史接口本就无 adjust 参数，故"本地生成复权"是唯一可行路径（比改拉取更稳，且不增网络调用）。
   - 验收：pytest 断言批处理喂给特征的是复权价、估值/成交用原始价；除权日前后特征无跳变。
 
 - [x] **N-2｜崩溃遗留的 `batch_runs.status='running'` 会把账户卡死在"假跳过"（【新发现】）**
@@ -135,6 +136,7 @@
 - **A-1 + A-4（2026-08-10，落地，保留，测试 128 全过）**：A-1 真实盘接入特征注入最优配置（config.json `feature_inject:true`，`--feature-inject` 批处理也生效）；A-4 `_date_type` 拒绝未来日期。⚠️ **但见 N-1：`batch._fetch_and_store` 未传 `adjust`，真实盘特征实为未复权价计算（A-1 只做了一半）**。
 - **A-2/A-3/A-5 + P2-1/P2-2 + B-1/B-2 + B-3（2026-08-10，落地，保留，测试 136 全过）**：A-2 引擎级异常隔离（batch 引擎循环 try/except）；A-3 收盘后 15:00 运行守卫（盘中返回 `before_close`）；A-5 回测默认 end=最近已收盘交易日（`_last_closed_trading_day`）；P2-1 回测默认从 config 读（`fill_mode:next_open` + `adjust:hfq`，Settings 加 `adjust`）；P2-2 滑点建模（`RiskConfig.slippage_bps` + `execute_decisions` 买升卖降 + `--slippage`）；B-1 真实盘 Rank IC 校准闭环（`decisions.forward_return` 列 migration + `_calibrate_forward_returns` 回填 + 日报展示累计 rank_ic）；B-2 日报升级（今日决策明细 + 基准对照 + 数据截至日期，get_snapshots 返回 bar_date）；B-3 市场环境注入（`market_env_inject` 实现默认关，`--market-env` 仅回测生效，A/B 验证后开启——见 N-6）。
 - **N-2 + N-12 + N-4（2026-08-10，落地，保留，测试 143 全过）**：N-2 崩溃遗留 running 不再卡死（`has_batch_run` 只认 done + `begin_batch_run` 同日 running 可重试，崩溃无快照自动补跑）；N-12 `daily_snapshots` 加 `source`（real/replay，历史回放不混入真实账本，含迁移）；N-4 日报新增"按信心分桶胜率"表（0~0.6 / 0.6~0.7 / 0.7+，独立于 IC 门槛有样本即渲染）。测试：`test_v12.py` 7 条 + v0.4 旧测试更新到新语义。N-1（真实盘特征复权，需双 bars）与 N-9（--catch-up）留待下一轮。
+- **N-1（2026-08-11，落地，保留，测试 149 全过）**：真实盘特征复权——双 bars 方案。`batch._fetch_and_store` 返回三元组（原始 bars_map / 复权 adjusted_map / failed），`_adjusted_bars_map` 本地用 `compute_adjusted_bars` + 分红缓存生成复权（零额外网络，失败降级原始）；`DecisionContext.adjusted_bars` 字段；`DeepSeekEngine._feature_bars` 特征（feature_inject + market_env）优先复权、估值/成交/价格展示保持原始；`_calibrate_forward_returns` 改复权价回填（含分红，与回测 hfq 一致）。由此真实盘与回测"看到同一个世界"：除权日特征不再假跳变。测试：`test_v13.py` 6 条（特征优先级/回退/prompt 特征复权价+价格展示原始/batch 双 bars 传递/分红失败降级/fwd 含分红）。注：实现时发现 N-1 核心代码在上轮（v0.12 之后、未提交）已在工作区写好，本轮补测试、修 `_feature_bars` 空列表回退瑕疵、验收并提交为 v0.13。
 
 ---
 

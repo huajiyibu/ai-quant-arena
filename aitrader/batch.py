@@ -77,7 +77,7 @@ class BatchRunner:
             self._policy_text = ""
 
         # 2. 拉行情 + 落库（截至指定日期，回放无前视）
-        bars_map, failed = self._fetch_and_store(date)
+        bars_map, adjusted_map, failed = self._fetch_and_store(date)
         if failed:
             logger.error("行情拉取失败: %s，当日跳过交易（避免静默坏数据）", failed)
             return {"_warning": f"bar_fetch_failed:{','.join(failed)}"}
@@ -103,7 +103,7 @@ class BatchRunner:
         for engine_type, engine in self.engines.items():
             try:
                 results[engine_type] = self._run_engine(
-                    engine_type, engine, date, bars_map, force
+                    engine_type, engine, date, bars_map, adjusted_map, force
                 )
             except Exception as exc:
                 logger.exception("引擎 %s 运行异常，已隔离（不影响其他引擎）", engine_type)
@@ -163,8 +163,14 @@ class BatchRunner:
                 account_id, dec_date, rec["symbol"], exit_ / entry - 1
             )
 
-    def _fetch_and_store(self, end_date: datetime | None = None) -> tuple[dict[str, list], list[str]]:
-        """拉取行情并落库；返回 (bars_map, 拉取失败的标的列表)"""
+    def _fetch_and_store(
+        self, end_date: datetime | None = None
+    ) -> tuple[dict[str, list], dict[str, list], list[str]]:
+        """拉取行情并落库；返回 (bars_map, adjusted_map, 拉取失败的标的列表)。
+
+        N-1 双 bars：bars_map 为原始行情（估值/成交/价格展示用）；adjusted_map 为本地生成的
+        复权行情（特征计算专用，消除除权跳空失真，与回测 adjust=hfq 口径一致）。
+        """
         bars_map: dict[str, list] = {}
         all_bars: list = []
         failed: list[str] = []
@@ -183,8 +189,30 @@ class BatchRunner:
                 failed.append(symbol)
             bars_map[symbol] = bars
             all_bars.extend(bars)
+        adjusted_map = self._adjusted_bars_map(bars_map)
         self.db.save_bars(all_bars)
-        return bars_map, failed
+        return bars_map, adjusted_map, failed
+
+    def _adjusted_bars_map(self, bars_map: dict[str, list]) -> dict[str, list]:
+        """本地生成复权 K 线（N-1）：P_adj(t)=P(t)+截至 t 累计分红。
+
+        复用 adjfactor（与回测 hfq 同一实现，零额外网络，分红进程内缓存）；
+        分红拉取失败降级为原始行情，不中断当日批处理。
+        """
+        from .adjfactor import compute_adjusted_bars, fetch_dividends
+
+        adjusted: dict[str, list] = {}
+        for sym, bars in bars_map.items():
+            cfg = self.settings.symbols[sym]
+            prefix = "sh" if cfg.exchange.upper() == "SH" else "sz"
+            try:
+                adjusted[sym] = compute_adjusted_bars(
+                    bars, fetch_dividends(f"{prefix}{sym}")
+                )
+            except Exception:
+                logger.warning("复权因子获取失败，%s 特征回退原始行情", sym)
+                adjusted[sym] = bars
+        return adjusted
 
     def _run_engine(
         self,
@@ -192,6 +220,7 @@ class BatchRunner:
         engine: DecisionEngine,
         date: datetime,
         bars_map: dict[str, list],
+        adjusted_bars_map: dict[str, list] | None = None,
         force: bool = False,
     ) -> dict:
         """运行单个引擎，返回该引擎当日摘要"""
@@ -240,6 +269,7 @@ class BatchRunner:
             symbol_names=self.settings.symbol_names,
             lookback=self.settings.lookback_days,
             policy_text=policy_text,
+            adjusted_bars=adjusted_bars_map,
         )
         result: EngineResult = EngineResult()
         try:
@@ -286,8 +316,9 @@ class BatchRunner:
             bar_date=actual_bar_date.strftime("%Y-%m-%d"),
             source=source,
         )
-        # B-1：回填已满 20 交易日窗口的 buy 决策 forward return（真实盘 Rank IC 校准）
-        self._calibrate_forward_returns(account_id, date, bars_map)
+        # B-1：回填已满 20 交易日窗口的 buy 决策 forward return（真实盘 Rank IC 校准）。
+        # N-1：用复权行情算收益（与回测口径一致，含分红）。
+        self._calibrate_forward_returns(account_id, date, adjusted_bars_map or bars_map)
         self.db.complete_batch_run(account_id, date)
 
         return {

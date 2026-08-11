@@ -81,12 +81,23 @@ class DeepSeekEngine(DecisionEngine):
             return f"{base}\n{self.system_prompt_extra}"
         return base
 
+    def _feature_bars(self, ctx: DecisionContext, symbol: str) -> list:
+        """特征计算专用 K 线（N-1）：优先复权 bars（无除权跳空），缺失/为空回退原始。
+
+        回测路径 ctx.adjusted_bars 为 None → 用 ctx.bars（回测全链路 hfq，bars 即复权价）。
+        """
+        if ctx.adjusted_bars is not None:
+            adj = ctx.adjusted_bars.get(symbol)
+            if adj:
+                return adj
+        return ctx.bars.get(symbol, [])
+
     def _format_market_env(self, ctx: DecisionContext) -> str:
         """市场温度计：用基准标的小特征拼一行市况（B-3，默认关）。"""
         if not ctx.bars:
             return ""
         sym = next(iter(ctx.bars))
-        bars = ctx.bars[sym]
+        bars = self._feature_bars(ctx, sym)
         if not bars:
             return ""
         f = compute_features(bars)
@@ -138,9 +149,9 @@ class DeepSeekEngine(DecisionEngine):
             name = ctx.symbol_names.get(symbol, symbol)
             closes = " ".join(f"{b.close:.3f}" for b in bars[-self.lookback:])
             lines.append(f"{symbol}({name}): {closes}")
-            # PP-2：注入确定性技术特征（替代模型心算；需复权数据避免除权跳空失真）
+            # PP-2：注入确定性技术特征（替代模型心算；N-1 用复权 bars 避免除权跳空失真）
             if self.feature_inject:
-                f = compute_features(bars)
+                f = compute_features(self._feature_bars(ctx, symbol))
                 if f:
                     lines.append(self._format_features(f))
 

@@ -22,6 +22,9 @@ class DecisionContext:
     symbol_names: dict[str, str]
     lookback: int = 20
     policy_text: str = ""
+    # N-1：特征计算专用复权 K 线（估值/成交/价格展示仍用 bars 原始价）。
+    # 为 None 时引擎回退用 bars（回测全链路 hfq，bars 本身即复权价，天然一致）。
+    adjusted_bars: dict[str, list[Bar]] | None = None
 
 
 @dataclass
