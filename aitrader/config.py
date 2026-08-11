@@ -49,6 +49,15 @@ class PolicyConfig(BaseModel):
     ])
 
 
+class NotifyConfig(BaseModel):
+    """异常/告警通知配置（N-10）：enabled=False 或 webhook_url 为空时不推送，静默降级"""
+
+    enabled: bool = False
+    webhook_url: str = ""  # Server酱/通用 webhook（GET 或 POST 均尝试）
+    max_drawdown_alert: float = Field(default=0.15, ge=0, le=1)  # 净值相对峰值回撤阈值
+    idle_days: int = Field(default=5, ge=1, le=60)  # 连续 N 个交易日无成交 → 提醒
+
+
 class Settings(BaseModel):
     """全局配置"""
 
@@ -66,6 +75,7 @@ class Settings(BaseModel):
     symbols: dict[str, SymbolConfig]
     risk: RiskConfig = RiskConfig()
     policy: PolicyConfig = PolicyConfig()
+    notify: NotifyConfig = NotifyConfig()  # 告警通知（N-10）
     db_path: Path = DEFAULT_DB_PATH
     api_key: str = ""
 

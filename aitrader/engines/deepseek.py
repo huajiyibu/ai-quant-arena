@@ -58,6 +58,9 @@ class DeepSeekEngine(DecisionEngine):
         # 响应缓存：以 (model, prompt) 为键（prompt 已完整编码决策输入；
         # ai 与 ai_policy 提示词相同时共享缓存，避免回测重复计费）
         self._cache = response_cache
+        # N-8：进程内 API 调用/缓存命中计数（写 last_run 供成本记账）
+        self.api_calls: int = 0
+        self.cache_hits: int = 0
 
     def decide(self, ctx: DecisionContext) -> EngineResult:
         """生成决策；异常向上抛出由 batch 统一降级"""
@@ -75,7 +78,8 @@ class DeepSeekEngine(DecisionEngine):
             "目标：追求长期正期望，不是每次都对；信号不明确就 hold，宁缺毋滥。\n"
             "决策框架：先看趋势与动量，再看波动率风险，最后决定是否动仓；"
             "只对高置信信号买卖，不追高、不接飞刀、不用杠杆。\n"
-            "输出契约：只输出 JSON 决策；buy 必须给出明确理由。"
+            "输出契约：只输出 JSON 决策；buy 必须给出明确理由，reason 以标签开头"
+            "（标签限：趋势/回调/政策/超买/超卖/其他，如 \"[趋势] 放量突破20日线\"）。"
         )
         if self.system_prompt_extra:
             return f"{base}\n{self.system_prompt_extra}"
@@ -181,7 +185,8 @@ class DeepSeekEngine(DecisionEngine):
             "规则: 1) action 仅限 buy/sell/hold; 2) buy 必带 amount(元), sell=清仓该标的; "
             f"3) 最多对{self.max_buy_count}个标的下buy; "
             "4) confidence 是 0~1 的数值，表示你对这个信号带来正收益的信心（不是市场必然性），"
-            "信号足够明确时才给高 confidence；5) 谨慎、保守、不追高、不接飞刀。"
+            "信号足够明确时才给高 confidence；5) 谨慎、保守、不追高、不接飞刀；"
+            "6) reason 以 [趋势]/[回调]/[政策]/[超买]/[超卖]/[其他] 之一开头，再接一句话理由。"
         )
         return "\n".join(lines)
 
@@ -195,8 +200,10 @@ class DeepSeekEngine(DecisionEngine):
             f"{self.model}|{self.temperature}|{system}|{prompt}".encode("utf-8")
         ).hexdigest()
         if self._cache is not None and key in self._cache:
+            self.cache_hits += 1  # N-8
             return self._cache[key]
 
+        self.api_calls += 1  # N-8：缓存未命中才计一次 API 会话（重试同属一次）
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",

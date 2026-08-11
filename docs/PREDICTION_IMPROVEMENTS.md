@@ -33,7 +33,8 @@
   - 改法：① `has_batch_run` 只认 `status='done'` 才算已处理；② `begin_batch_run` 对同日的 running 允许覆盖重试；③ 无快照的 running 一律允许重跑。
   - ✅ **v0.12 已落地（2026-08-10）**：`has_batch_run` 改为 `AND status='done'`；`begin_batch_run` 用 `ON CONFLICT DO UPDATE ... WHERE status='running'`（done 不被重试打回）；崩溃遗留 running 无快照 → 重跑自动补齐快照。测试 `test_stale_running_gets_rerun` / `test_begin_retry_keeps_done` 覆盖；v0.4 旧测试同步更新到新语义。
 
-- [ ] **N-3｜真实盘成交口径与 `fill_mode:next_open` 语义混淆（【新发现】，低危但需写清）**
+- [x] **N-3｜真实盘成交口径与 `fill_mode:next_open` 语义混淆（【新发现】，低危但需写清）**
+  - ✅ **v0.14 已落地（2026-08-11）**：`last_run.json` 新增 `fill_note`（真实盘=决策日收盘价成交、滑点默认0；回测 next_open+slippage 是更严苛口径、真实盘表现不应优于回测）；README 已同步口径说明。
   - 现状：`config.json` `fill_mode:"next_open"` 是回测假设（PP-1）；真实盘批处理 `execute_decisions` 不带 `fill_prices` → **实际按当日收盘价成交**，fill_mode 对批处理完全无作用。
   - 问题：用户/维护者看到"最优配置 = next_open"会误以为真实盘也在等次日开盘成交（实盘其实收盘即成交）；口径不写清易误读日报与回测对比。
   - 改法：README + `last_run.json` 明确标注"真实盘 = 收盘价成交（滑点默认 0）；回测 next_open + slippage 是更严苛口径，真实盘表现应不优于回测"；`last_run.json` 加 `fill_note`。
@@ -47,13 +48,15 @@
   - 改法：日报加"confidence 分桶胜率"小表（复用已回填 decisions）；可选加近 20 笔滑窗 IC 趋势。
   - ✅ **v0.12 已落地（2026-08-10，分桶部分）**：日报新增"按信心分桶（正收益占比）"表，桶 `0~0.6` / `0.6~0.7` / `0.7+`，独立于 IC 样本门槛（有样本即渲染）。滑窗 IC 趋势留待后续。
 
-- [ ] **N-5｜决策理由自由文本，缺结构化归因标签——无法自动复盘（【新发现】）**
+- [x] **N-5｜决策理由自由文本，缺结构化归因标签——无法自动复盘（【新发现】）**
+  - ✅ **v0.14 已落地（2026-08-11）**：提示词要求 reason 以 [趋势]/[回调]/[政策]/[超买]/[超卖]/[其他] 开头（system + 输出契约双处）；新增 `aitrader/attribution.py`（`parse_tag` + `attribute_trades` 按买入理由标签聚合已平仓配对盈亏）；日报新增"归因复盘"表；未带标签归入"其他"不崩溃。
   - 现状：`decisions.reason` / `trades.reason` 是自由文本，无可枚举的"这单是趋势/回调/政策/超买哪个理由"维度。
   - 问题：PP-6（历史盈亏反馈）是"喂给模型的复盘"，但在此之前缺"给用户的自动复盘"：哪类理由的买入后来亏了、哪类赚了，完全无法统计。
   - 改法：提示词要求 `reason` 以标签开头（如 `[趋势]`/`[回调]`/`[政策]`/`[超买]`/`[其他]`，输出契约加枚举说明）；新增 `scripts/attribution.py`（或 reporter 内）按标签聚合已平仓交易盈亏，输出到日报/周报。纯 prompt + 统计，零 schema 变化。
   - 验收：pytest 断言标签解析与聚合正确；未带标签的 reason 归入"其他"不崩溃。
 
-- [ ] **N-6｜B-3 市场环境注入"落地一半"：已实现但从未 A/B，真实盘也没接线（【新发现】）**
+- [x] **N-6｜B-3 市场环境注入"落地一半"：已实现但从未 A/B，真实盘也没接线（【新发现】）**
+  - ✅ **v0.14 已接线（2026-08-11，A/B 验证仍待做）**：`--market-env` 对批处理也生效（与 feature-inject 对称）；config.json 暴露 `market_env_inject:false`（默认关）。**仍未做 A/B（需烧 API 成本），保持默认关，README 标注"未验证"**。
   - 现状：`_format_market_env` 纯函数已实现且有单测，`Settings.market_env_inject` 默认 False、config.json 无字段、`--market-env` 只在回测分支生效、批处理不读。
   - 问题：一个"可能有用也可能有害"的提示词特性挂在中途——既没被验证（无 A/B 结论），又无法在真实盘开启。
   - 改法：① 先做小样本回测 A/B（A=现状 vs B=+市场环境行，同 system/特征/复权，同区间，≈几百次 API 一次计费）出结论；② 若 B 样本外 Sharpe ≥ A+0.1 再在 config 暴露 `market_env_inject` 给真实盘，否则按"无增量"如实记录并保持默认关。
@@ -85,24 +88,28 @@
 
 ### P2（自动 Agent 化 / 运维可观测，探索性）
 
-- [ ] **N-8｜每日批处理无 API 成本/调用量记账（【新发现】）**
+- [x] **N-8｜每日批处理无 API 成本/调用量记账（【新发现】）**
+  - ✅ **v0.14 已落地（2026-08-11）**：`DeepSeekEngine` 进程内 `api_calls`/`cache_hits` 计数（缓存未命中才计 API 会话，重试同属一次）；`last_run.json` 新增 `api_stats`（每 AI 引擎 calls/cache_hits），成本漂移可察觉。
   - 现状：真实盘每天固定 2 次 DeepSeek 调用（ai + ai_policy）+ 行情/政策拉取；`last_run.json` 不记 API 调用次数与估算费用。
   - 问题：模型被改贵 / 缓存失效 / 误配时成本漂移，无人值守下用户无法察觉。
   - 改法：`DeepSeekEngine` 加进程内 `api_call_count`（含缓存命中数）；`write_last_run` 记录 `api_calls` + `est_cost`（按次估算，写进 last_run 即可，不追求精确）。
   - 验收：pytest 断言缓存命中/未命中计数正确；`last_run.json` 含调用量字段。
 
-- [ ] **N-9｜连续缺交易日不自动补跑——启动项只补"今天"（【新发现】）**
+- [x] **N-9｜连续缺交易日不自动补跑——启动项只补"今天"（【新发现】）**
+  - ✅ **v0.14 已落地（2026-08-11）**：新增 `--catch-up [N]`（默认 5）——从目标引擎账户最近快照日的次日到昨天，逐交易日补跑（幂等，已有快照的日期自动跳过不重复成交）；无快照/无缺失时 no-op。启动项可改为 `run.py --catch-up`。
   - 现状：`install_task.ps1` = 每天 15:30 定时任务 + 登录时跑一次 `run.py`（仅当天）。若连续几天关机（周末+节假日+周一早上开机），只有"当天"被补跑，**前几个工作日缺失**（幂等不会重复成交，但缺失日期的决策/估值永远空白）。
   - 问题：真实盘账本"跳日"，资金曲线/基准对照不连续，Rank IC 样本少。
   - 改法：新增 `--catch-up [N]`：从最近一次快照日的次日开始，逐日补齐缺失交易日（内部循环 `--date`，幂等）；启动项改为 `run.py --catch-up`。
   - 验收：pytest 断言连续缺失 N 天后 catch-up 补齐全部快照且不重复成交；无缺失时 no-op。
 
-- [ ] **N-10｜无主动通知——机器坏了用户不知道（【新发现】）**
+- [x] **N-10｜无主动通知——机器坏了用户不知道（【新发现】）**
+  - ✅ **v0.14 已落地（2026-08-11）**：新增 `aitrader/notify.py`（`check_alerts` 判定失败/连续无成交/净值回撤；`send_notify` 推送 Server酱/通用 webhook，失败不阻塞）；config 加 `notify` 块（默认关，`webhook_url` 空则静默）。
   - 现状：定时任务失败 / key 失效 / 行情源变化只写日志 + `last_run.json`，用户不打开就无从知晓。
   - 改法：批处理结束检查"本次失败 / 连续 N 日无成交 / 净值回撤超阈值 / AI 缓存命中率骤降"，触发 Server酱/邮件/webhook 推送（新增 `aitrader/notify.py`，失败不阻塞主流程）；`config.json` 加 `notify` 开关。
   - 验收：pytest 断言告警条件判定纯函数正确；推送失败不影响批处理结果。
 
-- [ ] **N-11｜`bars` 表只写不读 + 数据源单点（存量 IMPROVEMENTS P2-1）**
+- [x] **N-11｜`bars` 表只写不读 + 数据源单点（存量 IMPROVEMENTS P2-1）**
+  - ✅ **v0.14 已落地（容灾部分，2026-08-11）**：行情主源失败时回退读 `bars` 表缓存兜底（当日新鲜度仍由 bar_date 硬校验把关，陈旧剔除不参与交易，不造假）。**缓存"提速"部分未做**——历史段复用缓存有前视/时效风险，评估收益 < 风险，明确不做。
   - 现状：`database.save_bars` 落库但无读取调用点；批处理/回测每次联网全量拉取，新浪单点挂了就全挂。
   - 改法：`fetch_daily_bars` 先查 `bars` 表缓存、缺的再补拉；行情源失败时 fallback 腾讯实时接口（`_fetch_realtime` 已实现，可推广为独立 fallback 源）。
   - 验收：pytest 断言缓存命中减少网络调用；主源失败降级不抛错。
@@ -137,6 +144,7 @@
 - **A-2/A-3/A-5 + P2-1/P2-2 + B-1/B-2 + B-3（2026-08-10，落地，保留，测试 136 全过）**：A-2 引擎级异常隔离（batch 引擎循环 try/except）；A-3 收盘后 15:00 运行守卫（盘中返回 `before_close`）；A-5 回测默认 end=最近已收盘交易日（`_last_closed_trading_day`）；P2-1 回测默认从 config 读（`fill_mode:next_open` + `adjust:hfq`，Settings 加 `adjust`）；P2-2 滑点建模（`RiskConfig.slippage_bps` + `execute_decisions` 买升卖降 + `--slippage`）；B-1 真实盘 Rank IC 校准闭环（`decisions.forward_return` 列 migration + `_calibrate_forward_returns` 回填 + 日报展示累计 rank_ic）；B-2 日报升级（今日决策明细 + 基准对照 + 数据截至日期，get_snapshots 返回 bar_date）；B-3 市场环境注入（`market_env_inject` 实现默认关，`--market-env` 仅回测生效，A/B 验证后开启——见 N-6）。
 - **N-2 + N-12 + N-4（2026-08-10，落地，保留，测试 143 全过）**：N-2 崩溃遗留 running 不再卡死（`has_batch_run` 只认 done + `begin_batch_run` 同日 running 可重试，崩溃无快照自动补跑）；N-12 `daily_snapshots` 加 `source`（real/replay，历史回放不混入真实账本，含迁移）；N-4 日报新增"按信心分桶胜率"表（0~0.6 / 0.6~0.7 / 0.7+，独立于 IC 门槛有样本即渲染）。测试：`test_v12.py` 7 条 + v0.4 旧测试更新到新语义。N-1（真实盘特征复权，需双 bars）与 N-9（--catch-up）留待下一轮。
 - **N-1（2026-08-11，落地，保留，测试 149 全过）**：真实盘特征复权——双 bars 方案。`batch._fetch_and_store` 返回三元组（原始 bars_map / 复权 adjusted_map / failed），`_adjusted_bars_map` 本地用 `compute_adjusted_bars` + 分红缓存生成复权（零额外网络，失败降级原始）；`DecisionContext.adjusted_bars` 字段；`DeepSeekEngine._feature_bars` 特征（feature_inject + market_env）优先复权、估值/成交/价格展示保持原始；`_calibrate_forward_returns` 改复权价回填（含分红，与回测 hfq 一致）。由此真实盘与回测"看到同一个世界"：除权日特征不再假跳变。测试：`test_v13.py` 6 条（特征优先级/回退/prompt 特征复权价+价格展示原始/batch 双 bars 传递/分红失败降级/fwd 含分红）。注：实现时发现 N-1 核心代码在上轮（v0.12 之后、未提交）已在工作区写好，本轮补测试、修 `_feature_bars` 空列表回退瑕疵、验收并提交为 v0.13。
+- **N-3/N-5/N-6/N-8/N-9/N-10/N-11（2026-08-11，落地，保留，测试 161 全过）**：一次性收尾剩余工程项。N-3 `last_run.json` 加 `fill_note` 成交口径说明；N-5 新增 `aitrader/attribution.py`（reason 标签解析 + 按标签聚合已平仓配对盈亏）+ 提示词要求 [趋势/回调/政策/超买/超卖/其他] 标签 + 日报"归因复盘"表；N-6 `--market-env` 批处理接线 + config 暴露（默认关，未 A/B 保持关）；N-8 `DeepSeekEngine.api_calls/cache_hits` 记账 + `last_run.api_stats`；N-9 `--catch-up [N]` 补跑缺失交易日（幂等）；N-10 新增 `aitrader/notify.py`（check_alerts 失败/无成交/回撤 + send_notify 推送失败不阻塞）+ config.notify（默认关）；N-11 主源失败回退 `bars` 表缓存兜底（容灾，当日新鲜度仍硬校验，不造假；"缓存提速"评估风险 > 收益明确不做）。测试：`test_v14.py` 12 条。
 
 ---
 

@@ -104,6 +104,7 @@ def build_daily_report(
         # B-1：真实盘 Rank IC 校准（AI 引擎信心是否有预测力）
         ic_line = ""
         bucket_html = ""
+        attr_html = ""
         if acc["engine_type"] in ("ai", "ai_policy"):
             cal = db.get_calibrated_decisions(acc["id"])
             if len(cal) >= 5:
@@ -140,6 +141,26 @@ def build_daily_report(
                     + "</table>"
                 )
 
+        # N-5：归因复盘（按买入理由标签聚合已平仓配对盈亏；未带标签归入"其他"）
+        from .attribution import attribute_trades
+
+        _attr = attribute_trades(db.get_trades(acc["id"]))
+        if _attr:
+            _arows = []
+            for tag in sorted(_attr):
+                a = _attr[tag]
+                _arows.append(
+                    f"<tr><td>{tag}</td><td>{a['n']}</td>"
+                    f"<td>{a['win_rate']:.0%}</td><td>{a['pnl']:+,.0f}</td></tr>"
+                )
+            attr_html = (
+                "<p>归因复盘（按买入理由标签，已平仓配对）：</p>"
+                "<table border=1 cellpadding=4 cellspacing=0>"
+                "<tr><th>标签</th><th>笔数</th><th>胜率</th><th>累计盈亏</th></tr>"
+                + "".join(_arows)
+                + "</table>"
+            )
+
         # B-2：今日决策明细
         today = last["date"]
         today_dec = [d for d in db.get_decisions(acc["id"]) if d["date"] == today]
@@ -169,6 +190,7 @@ def build_daily_report(
             {dec_line}
             {ic_line}
             {bucket_html}
+            {attr_html}
             </div>"""
         )
     cards_html = "\n".join(cards)

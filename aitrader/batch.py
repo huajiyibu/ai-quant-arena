@@ -14,7 +14,7 @@ from .config import Settings
 from .database import Database
 from .datasource import DataSource, PolicySource
 from .engines.base import DecisionContext, DecisionEngine, EngineResult
-from .models import AccountState, Decision, EngineType
+from .models import AccountState, Bar, Decision, EngineType
 from .portfolio import execute_decisions, refresh_prices
 
 logger = logging.getLogger(__name__)
@@ -185,6 +185,24 @@ class BatchRunner:
             except Exception:
                 logger.exception("行情获取失败: %s", symbol)
                 bars = []
+            if not bars:
+                # N-11：主源失败 → 尝试 bars 表缓存兜底（容灾而非提速，避免时效风险；
+                #      当日新鲜度仍由后续 bar_date 硬校验把关，陈旧则剔除不参与交易）
+                cached = self.db.get_bars(symbol, self.settings.lookback_days + 45)
+                if cached:
+                    bars = [
+                        Bar(
+                            symbol,
+                            datetime.strptime(c["date"], "%Y-%m-%d"),
+                            c["open"], c["high"], c["low"], c["close"], c["volume"],
+                        )
+                        for c in cached
+                    ]
+                    bars.sort(key=lambda b: b.datetime)
+                    logger.warning(
+                        "行情源失败，%s 使用 bars 缓存 %d 根（新鲜度由硬校验把关）",
+                        symbol, len(bars),
+                    )
             if not bars:
                 failed.append(symbol)
             bars_map[symbol] = bars

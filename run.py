@@ -74,6 +74,13 @@ def write_last_run(meta: dict) -> None:
         "mode": meta.get("mode", ""),
         "date": meta.get("date", ""),
         "engine_results": meta.get("engine_results", {}),
+        "api_stats": meta.get("api_stats", {}),
+        # N-3：成交口径说明（真实盘=收盘价成交；回测 next_open+slippage 是更严苛口径）
+        "fill_note": meta.get(
+            "fill_note",
+            "真实盘按决策日收盘价成交（滑点默认0）；回测 fill_mode=next_open + slippage "
+            "是更严苛假设，真实盘表现不应优于回测",
+        ),
         "ok": meta.get("ok", True),
         "error": meta.get("error", ""),
     }
@@ -186,6 +193,33 @@ def _last_closed_trading_day() -> datetime:
     while not ds.is_trading_day(d):
         d = d - timedelta(days=1)
     return datetime.combine(d.date(), datetime.min.time())
+
+
+def _catch_up_dates(settings, db, engines, data_source, today: datetime) -> list[datetime]:
+    """计算需要补跑的缺失交易日（N-9）：目标引擎账户最近快照日的次日 → 昨天，仅交易日。
+
+    无任何快照时返回空（从今天开始正常跑即可，无需历史补跑）。
+    """
+    last_dates: list[datetime] = []
+    for engine_type in engines:
+        acc = db.get_account_by_engine(engine_type)
+        if acc:
+            snaps = db.get_snapshots(acc["id"])
+            if snaps:
+                last_dates.append(datetime.strptime(snaps[-1]["date"], "%Y-%m-%d"))
+    if not last_dates:
+        return []
+    anchor = max(last_dates)
+    end = today - timedelta(days=1)  # 今天由当日任务处理（避免 A-3 收盘守卫）
+    if anchor.date() >= end.date():
+        return []
+    out: list[datetime] = []
+    d = anchor + timedelta(days=1)
+    while d.date() <= end.date():
+        if data_source.is_trading_day(d):
+            out.append(d)
+        d += timedelta(days=1)
+    return out
 
 
 def run_backtest(args, settings) -> int:
@@ -341,6 +375,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", type=_date_type, help="指定交易日 YYYY-MM-DD（默认今天）")
     parser.add_argument("--report-only", action="store_true", help="只出报表不交易")
     parser.add_argument("--force", action="store_true", help="强制重跑（跳过同日幂等检查）")
+    parser.add_argument(
+        "--catch-up",
+        nargs="?",
+        const=5,
+        type=int,
+        metavar="N",
+        help="补跑缺失交易日（最近快照次日→昨天，最多 N 个交易日；无参数默认 5，N-9）",
+    )
     parser.add_argument("--db", default=None, help="覆盖数据库路径")
     parser.add_argument("--backtest", action="store_true", help="walk-forward 回测模式（独立数据库）")
     parser.add_argument("--start", type=_date_type, help="回测起始日 YYYY-MM-DD（--backtest）")
@@ -425,6 +467,9 @@ def _run(args) -> int:
     # A-1：--feature-inject 对批处理也生效（真实盘接入最优配置）
     if args.feature_inject:
         settings.feature_inject = True
+    # N-6：--market-env 对批处理也生效（默认关，A/B 验证前不建议开）
+    if args.market_env:
+        settings.market_env_inject = True
 
     # 回测模式（独立数据库，不走每日账本）
     if args.backtest:
@@ -449,10 +494,27 @@ def _run(args) -> int:
     for w in warnings:
         print(f"[提示] {w}")
 
-    # 跑批处理
-    date = args.date if args.date else datetime.now()
     policy_source = AkSharePolicySource() if settings.policy.enabled else None
     runner = BatchRunner(settings, db, AkShareDataSource(), engines, policy_source=policy_source)
+
+    # N-9：--catch-up 补跑缺失交易日（幂等：已有快照的日期自动跳过，不重复成交）
+    if args.catch_up:
+        catch_dates = _catch_up_dates(
+            settings, db, engines, runner.data_source, datetime.now()
+        )
+        catch_dates = catch_dates[: max(args.catch_up, 1)]
+        for cd in catch_dates:
+            runner.run(cd)
+        if catch_dates:
+            print(
+                f"[catch-up] 补跑 {len(catch_dates)} 个缺失交易日: "
+                f"{[c.strftime('%Y-%m-%d') for c in catch_dates]}"
+            )
+        else:
+            print("[catch-up] 无缺失交易日，跳过")
+
+    # 跑批处理
+    date = args.date if args.date else datetime.now()
     results = runner.run(date, force=args.force)
 
     # 输出汇总 + 报表
@@ -483,6 +545,13 @@ def _run(args) -> int:
     print(f"资金曲线已更新: {out}")
     print(f"日报已生成: {report}")
 
+    # N-8：API 调用量记账（成本漂移可察觉）
+    api_stats = {
+        k: {"calls": getattr(v, "api_calls", 0), "cache_hits": getattr(v, "cache_hits", 0)}
+        for k, v in engines.items()
+        if hasattr(v, "api_calls")
+    }
+
     # 写 last_run：供快速核对"今天跑没跑成"
     write_last_run(
         {
@@ -496,11 +565,57 @@ def _run(args) -> int:
                 }
                 for k, v in results.items()
             },
+            "api_stats": api_stats,
             "ok": True,
             "error": "",
         }
     )
+
+    # N-10：告警通知（默认关；推送失败不阻塞）
+    _maybe_notify(settings, db, engines, results, date)
     return 0
+
+
+def _maybe_notify(settings, db, engines, results, date) -> None:
+    """N-10：批处理结束后按告警条件推送；默认关，推送失败静默。"""
+    if not settings.notify.enabled or not settings.notify.webhook_url:
+        return
+    from aitrader.notify import check_alerts, send_notify
+
+    ok = "_warning" not in results and all(
+        not r.get("error") for r in results.values()
+    )
+    error = results.get("_warning", "") or next(
+        (r.get("error", "") for r in results.values() if r.get("error")), ""
+    )
+    snapshots: list[dict] = []
+    trades_count = 0
+    acc = None
+    for et in engines:
+        a = db.get_account_by_engine(et)
+        if a:
+            acc = a
+            break
+    if acc:
+        snapshots = db.get_snapshots(acc["id"])
+        n = settings.notify.idle_days
+        cutoff = datetime.combine(date.date() - timedelta(days=n * 2), datetime.min.time())
+        trades = db.get_trades(acc["id"])
+        recent_days = {
+            t["date"] for t in trades
+            if datetime.strptime(t["date"], "%Y-%m-%d") >= cutoff
+        }
+        trades_count = len(recent_days)
+    alerts = check_alerts(
+        ok,
+        error,
+        snapshots,
+        trades_count,
+        idle_days=settings.notify.idle_days,
+        max_drawdown=settings.notify.max_drawdown_alert,
+    )
+    if alerts:
+        send_notify("\n".join(alerts), settings.notify.webhook_url)
 
 
 if __name__ == "__main__":
