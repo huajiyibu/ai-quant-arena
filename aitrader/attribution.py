@@ -17,11 +17,12 @@ def parse_tag(reason: str | None) -> str:
     return m.group(1).strip() if m else "其他"
 
 
-def attribute_trades(trades: list[dict]) -> dict[str, dict]:
-    """按 reason 标签聚合已配对买入交易的盈亏。
+def attribute_trades(trades: list[dict], commission_rate: float = 0.00025) -> dict[str, dict]:
+    """按 reason 标签聚合已配对买入交易的盈亏（P1-1：净口径，扣双边佣金）。
 
     Args:
         trades: database.get_trades 返回的记录，含 date/symbol/action/price/volume/amount/reason
+        commission_rate: 双边佣金率（默认 0.025% 与 config 一致）
 
     Returns:
         {标签: {"n": 笔数, "pnl": 累计盈亏, "win": 盈利笔数, "win_rate": 胜率}}
@@ -41,7 +42,11 @@ def attribute_trades(trades: list[dict]) -> dict[str, dict]:
             elif t["action"] == "sell" and open_buys:
                 b = open_buys.pop(0)  # FIFO 配对
                 vol = min(b["volume"], t["volume"])
-                pnl = (t["price"] - b["price"]) * vol
+                # P1-1：净口径（卖价扣佣 - 买价含佣）
+                pnl = (
+                    t["price"] * (1 - commission_rate)
+                    - b["price"] * (1 + commission_rate)
+                ) * vol
                 pairs.append((parse_tag(b.get("reason")), pnl))
 
     agg: dict[str, dict] = {}
@@ -56,7 +61,7 @@ def attribute_trades(trades: list[dict]) -> dict[str, dict]:
     return agg
 
 
-def closed_trade_pairs(trades: list, max_items: int = 5) -> list[dict]:
+def closed_trade_pairs(trades: list, max_items: int = 5, commission_rate: float = 0.00025) -> list[dict]:
     """返回最近已平仓配对明细（PP-6 历史盈亏反馈用）。
 
     Args:
@@ -89,7 +94,10 @@ def closed_trade_pairs(trades: list, max_items: int = 5) -> list[dict]:
                 b = open_buys.pop(0)  # FIFO 配对
                 b_price = _f(b, "price")
                 s_price = _f(t, "price")
-                pnl_pct = s_price / b_price - 1 if b_price > 0 else 0.0
+                # P1-1：净口径（扣双边佣金），与 attribute_trades 一致
+                net_sell = s_price * (1 - commission_rate)
+                net_buy = b_price * (1 + commission_rate)
+                pnl_pct = net_sell / net_buy - 1 if net_buy > 0 else 0.0
                 pairs.append(
                     {
                         "symbol": _f(t, "symbol"),

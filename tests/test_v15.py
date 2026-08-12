@@ -58,7 +58,7 @@ def test_closed_trade_pairs_dict():
     p = pairs[0]
     assert p["symbol"] == "510300"
     assert p["buy_date"] == "2024-01-05" and p["sell_date"] == "2024-01-20"
-    assert p["pnl_pct"] == pytest.approx(4.4 / 4.0 - 1)
+    assert p["pnl_pct"] == pytest.approx((4.4 * 0.99975) / (4.0 * 1.00025) - 1)
     assert p["reason"] == "[趋势] 突破"
 
 
@@ -69,7 +69,7 @@ def test_closed_trade_pairs_trade_objects():
     ]
     pairs = closed_trade_pairs(trades, max_items=5)
     assert len(pairs) == 1
-    assert pairs[0]["pnl_pct"] == pytest.approx(0.1)
+    assert pairs[0]["pnl_pct"] == pytest.approx((4.4 * 0.99975) / (4.0 * 1.00025) - 1)
     assert pairs[0]["sell_date"] == "2024-01-20"
 
 
@@ -98,7 +98,7 @@ def test_prompt_includes_feedback_section():
     prompt = eng._build_prompt(_ctx(feedback_n=5, closed=closed))
     assert "近期已平仓交易" in prompt
     assert "[趋势] 突破" in prompt
-    assert "盈亏+10.0%" in prompt or "盈亏+10" in prompt
+    assert "盈亏+9.9%" in prompt or "盈亏+10.0%" in prompt
 
 
 def test_prompt_no_feedback_when_zero():

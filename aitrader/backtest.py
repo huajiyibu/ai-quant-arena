@@ -375,11 +375,6 @@ class Backtester:
                     ]
                 )
 
-            # PP-4：收集有效 buy 的置信度（供 Rank IC 校准评测；内存内，0 落库）
-            for dec in result.decisions:
-                if dec.action == "buy" and dec.valid and dec.symbol in names:
-                    buys.append((day, dec.symbol, dec.confidence))
-
             # PP-5：止损/止盈强制卖出（先于模型决策执行）
             forced = apply_stop_rules(state, prices, self.settings.risk)
             new_state, trades, _ = execute_decisions(
@@ -394,6 +389,11 @@ class Backtester:
             self._trades_so_far.extend(trades)
             for t in trades:
                 self.db.add_trade(account_id, t)
+            # PP-4/P0-5：Rank IC 只收实际成交的 buy（被风控拒绝的不算）
+            exec_buys = {t.symbol for t in trades if t.action == "buy"}
+            for dec in result.decisions:
+                if dec.action == "buy" and dec.valid and dec.symbol in exec_buys:
+                    buys.append((day, dec.symbol, dec.confidence))
             if self.record_decisions:
                 for dec in result.decisions:
                     self.db.add_decision(

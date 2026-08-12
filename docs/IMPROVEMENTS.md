@@ -1,96 +1,121 @@
-# AI 自动交易体验机 · 代码评审与改进建议
+# AI Quant Arena · 代码评审与改进建议
 
 | 项目 | 内容 |
 |---|---|
-| 版本 | 0.3（覆盖 v0.2 正文，保留历史落地记录） |
-| 日期 | 2026-08-09 |
+| 版本 | 0.4（覆盖 v0.3 正文，反映代码 v0.16 现状） |
+| 日期 | 2026-08-12 |
 | 状态 | 评审稿（待确认优先级后落地） |
-| 评审对象 | `ai_trader/` 全工程（引擎 / 风控 / 账本 / 回测 / 数据源 / 报表 / 部署） |
+| 评审对象 | `ai_trader/` 全工程（引擎 / 风控 / 账本 / 回测 / 数据源 / 报表 / 部署 / 通知） |
 
-> 本文档基于当前代码逐行阅读 + 全量 72 个 pytest 用例通过（2026-08-09）验证。v0.1/v0.2 已落地项直接进入第 6 节"已验证"清单；已提未做项标注"存量，未落地"；本轮新增 P0-1、P0-2、P1-6 与 P2-9~13 等新发现。每条建议均指向具体文件与函数，便于落地与验收。
+> 本文档基于当前代码逐行阅读 + 全量 175 个 pytest 用例通过（2026-08-12）验证。**双轨分工**：工程可靠性轨（本文件）只管"机器能否安全、幂等、可观测地自动跑"；预测/决策质量轨（`docs/PREDICTION_IMPROVEMENTS.md`）管"决策质量与评测闭环"（PP-1~PP-8、N-1~N-12、A/B 实验），二者不重复。v0.1~v0.16 已落地项收敛进第 6 节"落地记录"；本轮新发现以 🔴 标注。
 
 ---
 
 ## 1. 总体评价
 
-系统作为"AI 决策能力评测体验机"已达合格工程水平：
+系统作为"自动量化体验机"已达**较高的工程成熟度**：
 
-- ✅ 分层清晰、依赖可注入、核心逻辑可单测（72 个 pytest 用例全过）。
-- ✅ 全量留痕：决策输入行情 + 原始输出均入库，任何一笔可回溯。
-- ✅ 多引擎独立账本 + walk-forward 回测 + 幂等 / 交易日判断 / 单实例锁 / 日志留证 / 行情失败当日跳过等工程细节已完善（v0.1/v0.2 落地）。
+- ✅ 分层清晰、核心逻辑纯函数可单测（175 用例全过）。
+- ✅ 全量留痕（prompt / raw / validation / execution_result）、幂等（快照 + `batch_runs` 标记）、交易日判断、单实例锁、日志轮转、行情失败当日跳过、数据时点硬校验（bars[-1]==决策日）、政策 15:30 截断防前视、双 bars（真实盘特征复权）、网络硬超时 + IPv6 修复等已完善（v0.1~v0.16 落地）。
+- ✅ 真实盘已接入 A/B 最优配置（feature_inject + market_env + hfq 复权），现金生息、止损/止盈/滑点/置信度门槛/历史盈亏反馈等实验参数齐备。
 
-距"无人值守、结果可当真"仍有三块短板：
+距"可无人值守、可自我改进的自动量化 Agent"仍差五块：
 
-1. **回测报表混入历史残留账户**（P0-1）——不同区间/引擎的陈旧曲线并列展示，误导对比；
-2. **数据新鲜度无守卫**（P0-2）——日历降级或数据源滞后时，会用旧价制造"当日"假快照；
-3. **成交模型 / 信号输入 / 政策归因仍停留在"可用但不够科学"**（P1-1~P1-6，多为存量）。
+1. **`--force` / 崩溃重跑非幂等**（P0-1）——同日重跑可能重复成交 + 重复计息，账本被污染；
+2. **可观测性有洞**（P0-2/P0-3）——告警只看第一个引擎、日报"数据截至"失效；
+3. **N-9 补跑没接线**（P0-4）——部署脚本仍跑裸 `run.py`，连续关机缺口照旧；
+4. **回测评测口径**（P0-5/P1-1）——Rank IC 混入未成交 buy、归因不含佣金；
+5. **Agent 化缺"实验台账 + 自检"**（P1-5/P2-8）——回测不落库、无 `--health`。
 
-一句话大白话：**这台机器现在已经能规规矩矩每天自己跑、每笔决策都留底；但要"把结果当真"，还差两件事——回测报表别把上一轮的旧曲线混进来，行情没更新也别拿旧价格假装今天成交了。**
+一句话大白话：**机器现在每天能自己跑、每笔都留底；但要当"自动 Agent"放心用，还差两件事——同一件事别重复算两次（幂等），坏了/卡了/空转要能让我一眼看到（可观测）。**
 
 ---
 
 ## 2. 🔴 P0（真 Bug / 数据可信度，建议最先处理）
 
-### P0-1 回测报表混入历史残留账户（陈旧曲线并列展示，误导对比）
+### P0-1 `--force` / 崩溃重跑同日非幂等：重复成交 + 重复计息
 
-- **位置**：`run.py::run_backtest`（回测循环）／`aitrader/reporter.py::plot_backtest_curves`、`build_backtest_report`（遍历 `db.get_accounts()`）／`aitrader/database.py::get_accounts`
-- **问题（现状 + 为什么是问题）**：`run_backtest` 只对"本轮选中的引擎"调 `Backtester.run()`（内部 `reset_account` 重放），**未选中的引擎账户保留上次回测的快照/成交**；而两个报表函数遍历 backtest.db 的**全部账户**。因此先跑过 `--backtest`（默认 both = rule + ai）后，再跑 `--backtest --engine rule`，图表/报告里仍会出现上一次的 ai（甚至 ai_policy）曲线，与当前 rule 曲线并列 → 把"不同区间、不同引擎"的陈旧数据当成同一次对比，直接误导评测结论。
-- **建议**：① `run_backtest` 把本轮 `engine_type` 集合传给两个报表函数，只渲染本轮引擎的账户；② 或给回测库加 `run_id`（每次回测生成新 id 落库），报表按 `run_id` 过滤；③ 加单测：先跑双引擎再单引擎回测，断言报表只含当前引擎。
-- **影响**：消除"看图说话"最大的误导源；改动集中在 `run_backtest` 与两个报表函数，风险低。
+- **位置**：`aitrader/batch.py::_run_engine`／`aitrader/portfolio.py::apply_cash_interest`／`aitrader/database.py::add_trade`
+- **问题（现状 + 为什么是问题）**：
+  - `trades` 表无 `UNIQUE(account_id, date, symbol, action)` 唯一约束：`--force` 同日重跑时，AI 因温度/状态变化可能给出新决策，直接再 INSERT 一笔新成交（重复建仓/平仓），`trade_count`、`compute_metrics`、归因全部被重复计入；
+  - `apply_cash_interest` 无"当日已计息"标记：`--force` 重跑基于**已含当日利息**的现金再计一次息（崩溃窗口同理：`save_state` 已写、快照未写时重跑 → 双计息）；
+  - `update_decision_execution` 的 `WHERE execution_result IS NULL` 让重跑的成果无法回填。
+- **建议**：① 重新定义 `--force` 语义——要么"先清当日该账户 trades/decisions/batch_run 再重跑"，要么"只重估值不重成交"；② `trades` 加唯一约束 + upsert（同日同标的同向视为更新）；③ 利息幂等：`account_states` 记 `last_interest_date`，同日起跳过，或改为"按快照日差计息"。
+- **影响**：无人值守下 `--force` 是排障常用手段，当前会把账本改坏——本轮最需先修。
 
-### P0-2 交易日历降级 + 无"数据新鲜度守卫"——工作日节假日 / 数据源滞后会用旧价成交
+### P0-2 告警只看第一个引擎账户——AI 引擎空转/回撤不告警
 
-- **位置**：`aitrader/datasource.py::_load_trade_calendar`、`is_trading_day`／`aitrader/batch.py::run`、`_fetch_and_store`
-- **问题**：① 交易日历进程启动时拉一次，失败置空 → `is_trading_day` 降级为"仅跳过周末"（SRS FR13 已知设计）；此时若当天是**工作日节假日**，会被当成交易日，akshare 返回**最近一个交易日的旧 K 线**（非空，不触发 v0.2 已修的行情失败保护）→ 照常决策并写入"节假日日期"的快照与成交。② 即便日历正常，**当日行情源未更新**（数据源滞后，或 15:30 时当日数据尚未发布）时，`bars[-1].close` 也是旧价，`prices` 直接取用 → 制造"当日"假快照。两者都是与 v0.2 已修"行情拉空"同级的**静默坏数据**入口。
-- **建议**（改动小、推荐）：① `_fetch_and_store` 拉取后加"新鲜度守卫"：至少一个标的 `bars[-1].datetime.date() == 目标交易日` 才允许交易，否则当日跳过、写 `_warning=stale_bars`，与 v0.2 走同一路径；② 交易日历失败时在 `last_run.json`/日志显著告警（目前静默置空）；③ 单测：FakeDataSource 返回截止到 2 天前的旧 K 线 + 交易日，断言当日跳过。
-- **影响（trade-off 说明）**：保守方案会**跳过**那些"当日数据尚未发布"的交易日（少成交几天但不产生假数据）；如不愿跳过，则至少应在快照里记录实际 `bar_date` 供审计。建议默认保守 + 记录 `bar_date`。
-- **需验证**：新浪 `fund_etf_hist_sina` 当日数据的确切发布时间（15:30 时是否已有当日 K 线）。
+- **位置**：`run.py::_maybe_notify`
+- **问题**：`for et in engines: a = db.get_account_by_engine(et); if a: acc = a; break` —— 只取**第一个**找到的账户（默认 rule 引擎）就 `break`。`check_alerts` 的"连续无成交 / 净值回撤"只用该账户判定 → AI 引擎长期空转或深回撤时**不触发任何告警**，N-10 实际只对 rule 生效。
+- **建议**：跨全部引擎账户聚合——回撤取各引擎中最大者、成交数取全部账户交易日并集；或对每个引擎分别判定。
+- **影响**：通知功能实际覆盖与文档不符；改动小。
+
+### P0-3 日报头部"数据截至"失效（逻辑写反）
+
+- **位置**：`aitrader/reporter.py::build_daily_report`
+- **问题**：`if bar_date > today: data_until = max(...)` 只在"行情日期晚于今天"（正常不可能发生）时更新头部 `数据截至`；真正需要暴露的**陈旧**（`bar_date < today`，如实时补全失败回退旧价）在头部永远显示"—"，只有卡片小字 `（估值截至 X）`。B-2/F-11 本意是"显著暴露数据滞后"，实际没暴露。
+- **建议**：头部 `数据截至 = max(所有账户 bar_date)`，且 `bar_date < today` 时高亮红色警示；卡片与头部口径统一。
+- **影响**：用户靠日报判断"今天的数据新不新"，当前会误以为数据是新的。
+
+### P0-4 N-9 `--catch-up` 未接线到部署脚本——连续关机缺口照旧
+
+- **位置**：`scripts/install_task.ps1`（定时任务 + 启动项都跑裸 `run.py`）
+- **问题**：N-9 已实现 `--catch-up`，但部署脚本仍 `pythonw run.py`（不带参数）。周末 + 节假日 + 周一早上开机，登录启动项只补"今天"，前几个工作日缺口依旧，资金曲线 / 基准对照 / Rank IC 样本继续断档。
+- **建议**：启动项 `.lnk` 的 `Arguments` 改为 `run.py --catch-up`；定时任务保持 15:30 裸跑（当天由它处理）。
+- **影响**：一行改动让"补跑"真正生效；否则 N-9 是空转。
+
+### P0-5 回测 Rank IC 混入"未成交"的 buy——校准被污染
+
+- **位置**：`aitrader/backtest.py::Backtester.run`（`buys` 收集在 `execute_decisions` **之前**）
+- **问题**：`buys` 收集所有 `action=="buy" and dec.valid` 的决策，但其中一部分随后被 `execute_decisions` 拒绝（已持仓 / 现金不足 / 单日超限）。Rank IC 把"决策意图"与"实际成交"混在一起，评估的是"模型想买什么"而非"模型实际赚了什么"。
+- **建议**：只收集**当日实际成交的 buy**（从当日 `trades` 或 `execution_results` 过滤 `executed:buy` 的决策）再进 `compute_forward_returns`；batch 的 `_calibrate_forward_returns` 同样应只回填已成交 buy（当前 `get_uncalibrated_buys` 含被拒 buy）。
+- **影响**：评测科学性；改动小（过滤条件一行）。
 
 ---
 
 ## 3. 🟡 P1（可靠性 / 评测科学性）
 
-### P1-1 回测/仿真"当日收盘价成交"偏乐观（存量 2.5，未落地，需拍板）
+### P1-1 归因 / 浮盈不含佣金——收益口径偏乐观
+- **位置**：`aitrader/attribution.py::attribute_trades`（`pnl=(卖价-买价)×量`）／`aitrader/models.py::Position.unrealized_pnl`
+- **问题**：归因复盘与持仓浮盈都不扣买卖佣金（佣金只体现在 `AccountState.cash` 层面）。高换手时"标签盈亏"系统性偏高。
+- **建议**：归因按 `(卖价×(1-佣金) - 买价×(1+佣金))×量` 净口径；`Position` 加含佣 `cost_basis` 算浮盈。
+- **影响**：让"哪类理由赚钱"的复盘更诚实。
 
-- **位置**：`aitrader/backtest.py::Backtester.run`／`aitrader/portfolio.py::execute_decisions`
-- **问题**：15:30 收盘后决策却以**当日收盘价**成交 = 假设能在收盘价买入，实盘做不到（至少次日开盘），收益被高估。
-- **建议**：① 严格做法：决策用截至当日行情、成交用**次日开盘价**（回测内错位一天，需拍板：回测变慢、需引入次日 open）；② 或保持现状，在 `backtest_report.html` / README 明确标注"收盘价成交 + 无滑点 = 乐观上界"。
-- **影响**：评测结论更接近可实现收益。
+### P1-2 AI 对"已持仓标的"再下 buy，引擎校验层不拦（validation 记 ok）
+- **位置**：`aitrader/engines/deepseek.py::_validate`
+- **问题**：`_validate` 对 buy 只查 amount/confidence/buy_count，不查 `已持仓`；`execute_decisions` 才以 `risk_rejected:已持仓` 拒绝 → "决策质量"统计里这类错误 buy 被记 `validation=ok`，乱写率失真。
+- **建议**：`_validate` 增加 `d.symbol in ctx.account.positions → validation="already_holding"`（与 execute 一致）。
+- **影响**：决策留痕更精确；改动约 3 行。
 
-### P1-2 行情未复权——ETF 分红除息让指标失真（存量 2.6，未落地，需调研接口）
+### P1-3 实时行情接口无重试——偶发抖动即当日剔除该标的
+- **位置**：`aitrader/datasource.py::_fetch_realtime`（直接单次 `requests.get`）
+- **问题**：新浪历史接口滞后 1 交易日，`_fetch_realtime` 是当日 bar 的唯一来源；它不经过 `retry_call`，一次超时/抖动 → 该标的被判陈旧剔除，可能整日跳过交易。
+- **建议**：`_fetch_realtime` 接入 `retry_call`（1s/2s），与 `fetch_daily_bars` 一致。
+- **影响**：提升无人值守的成交连续性；改动约 2 行。
 
-- **位置**：`aitrader/datasource.py::AkShareDataSource.fetch_daily_bars`
-- **问题**：`fund_etf_hist_sina` 返回**未复权价**；分红除息价格跳空 → 双均线假金叉/假死叉、AI 看到不连续序列，长期失真累积。
-- **建议**：调研新浪/东财**前复权**参数并切换（**需验证接口能力**）；短期无法接入则必须在 README / 回测报告注明"未复权、忽略分红除息"。
-- **影响**：评测数据可信度的根基。
+### P1-4 交易日历拉取无重试 / 无本地缓存
+- **位置**：`aitrader/datasource.py::_load_trade_calendar`
+- **问题**：进程启动拉一次，失败置 `calendar_ok=False` → 当日（若为工作日）整日保守跳过。无人值守下"偶发一次网络失败 = 少跑一天"。
+- **建议**：`retry_call` 包装 + 成功落盘 `data/trade_calendar.json` 复用（次日启动先读缓存，失败才联网）。
+- **影响**：减少因日历抖动导致的漏跑。
 
-### P1-3 喂给模型的信号太弱（存量 3.1，未落地）
+### P1-5 回测结果无结构化留档（run ledger）——"自动 Agent 自我改进"的地基
+- **位置**：`run.py::run_backtest`／`aitrader/backtest.py`
+- **问题**：每次回测只打印 + 生成 HTML，配置、指标、基准、Rank IC、API 调用量都不落库。跑过的实验无法历史对比，"哪次改了 system / 参数得出哪个结果"全靠记忆，多 AI 评审协作时容易对不上账；`record_decisions` 落库的决策也**没有回填 execution_result**（回测里 `_` 丢弃）。
+- **建议**：新增 `backtest_runs` 表（run_id、时间、区间、config 快照 JSON、各引擎 metrics、bench、rank_ic、api_calls/cache_hits、fill/adjust/feature 等实验参数），每次回测写入；`--list-runs` 可查；回测落库决策顺带回填 execution_result。
+- **影响**：把"评测"从一次性动作变成可追踪记录，是后续自动调参/自动对比的必需品。
 
-- **位置**：`aitrader/engines/deepseek.py::_build_prompt`
-- **问题**：提示词只有 20 个收盘价 + 现金 + 持仓，模型要心算均线/涨跌幅/波动率——考验算术而非决策能力。
-- **建议**：算好 MA5/10/20、20 日累计涨跌幅、RSI、20 日波动率、距 20 日高/低点位置后注入。
-- **影响**：AI 决策质量可复现，评测更公平。
+### P1-6 `write_last_run` 错误路径清空上次正常记录
+- **位置**：`run.py::write_last_run`（`main` 的 except 分支）
+- **问题**：运行中途异常时写 `mode=error` 且 `engine_results={}`，覆盖掉"上次成功"的信息；排障时无法对比"上次正常 vs 这次失败"。
+- **建议**：异常路径保留上次的 `engine_results`（或追加 `last_ok` 字段）。
+- **影响**：可观测性；改动小。
 
-### P1-4 政策版无法统计归因（存量 3.2，未落地）
-
-- **位置**：`aitrader/batch.py::_fetch_policy`（政策文本未落库）／`aitrader/engines/deepseek.py::include_policy`／`aitrader/reporter.py`
-- **问题**：只对比曲线，"政策有没有用"无统计依据；政策文本不存档 → 政策版无法做历史回测。
-- **建议**：① 新增 `policy_archive` 表每日**原样存档**（含日期），从启用日攒历史；② 攒够后用"历史当日可见政策"喂入做历史回测；③ 输出两版 AI **逐日决策差异表** + 分歧事后归因；④ 报表加 `decisions.validation` 的"乱写率"视图。
-- **影响**：三引擎对比从"看图说话"变"可统计"。
-
-### P1-5 无止损 / 仓位进阶（存量 3.4，未落地）
-
-- **位置**：`aitrader/risk.py::validate_buy`／`aitrader/portfolio.py::execute_decisions`
-- **问题**：只有单笔 ≤30% / 单日 ≤50%，无止损；规则与 AI 都是趋势跟踪，单边下跌一直扛。
-- **建议**（风险从小到大）：① 单标的浮亏硬止损（每日刷新后检查自动卖出）；② 总资产自峰值回撤熔断；③ 盈利后移动止损。
-- **影响**：回撤可控，评测更接近真实风控。
-
-### P1-6 AI 回测首跑调用成本无上限（新发现）
-
-- **位置**：`run.py::run_backtest`／`aitrader/backtest.py::Backtester.run`
-- **问题**：无缓存首次回测**逐日调用 DeepSeek**：4.5 年 ≈ 1100 交易日 → ai 引擎约 1100 次 API 调用（显式跑 ai_policy 再翻倍），成本/耗时不可控；缓存只在"完全相同区间 + 相同持仓状态"时命中。
-- **建议**（需拍板 trade-off）：① 回测前打印预计调用次数与提示；② 提供 `--max-calls` 上限或"每 N 日决策一次"的抽样模式；③ 缓存落 SQLite，支持崩溃后断点续跑。
-- **影响**：避免一次误操作烧掉大量 API 额度。
+### P1-7 idle 告警用日历天数近似交易日 + 长期空仓误报
+- **位置**：`run.py::_maybe_notify`（`cutoff = date - timedelta(days=n*2)`）／`aitrader/notify.py::check_alerts`
+- **问题**：① 用 `n*2` 天近似 N 个交易日不精确（节假日/长假偏差大）；② `trades_count==0` 无条件告警，对"策略本来就长期空仓"（AI 保守风格）是持续误报噪音。
+- **建议**：用 `is_trading_day` 过滤统计最近 N 个交易日成交；空转告警区分"有持仓但无成交"（真异常）与"本来就空仓"（正常，降级为提示）。
+- **影响**：告警可信度。
 
 ---
 
@@ -98,74 +123,75 @@
 
 | # | 类别 | 位置 | 问题（现状） | 建议 |
 |---|---|---|---|---|
-| P2-1 | 存量 4.1 | `aitrader/datasource.py`／`aitrader/backtest.py`／`aitrader/batch.py::_fetch_and_store` | akshare 单点，挂了就全挂；`bars` 表**只写不读**（`get_bars` 无任何调用点，已确认），批处理与回测每次都联网拉全量 | `fetch_daily_bars` 先查 `bars` 表、缺的再补拉；数据源失败时 fallback 其他源 |
-| P2-2 | 存量 4.2 | `aitrader/reporter.py::plot_compare` | 日报对比图仍是绝对"总资产（1e6 轴）" | 与回测图统一为净值起点=1；加逐笔成交明细 + "乱写率"视图 |
-| P2-3 | 存量 4.3 | `aitrader/reporter.py`（两处 rcParams） | `Microsoft YaHei` 硬编码，跨平台乱码 | 走 `matplotlib.font_manager` 探测可用字体 |
-| P2-4 | 存量 4.4 | `aitrader/database.py::_connect` | 无 WAL、`trades/decisions` 无索引（按 account_id 查）、`save_bars` 逐条 INSERT、每操作重开连接 | `PRAGMA journal_mode=WAL`、加索引、`executemany`、改长连接 |
-| P2-5 | 存量 4.5 | `config.json`／`aitrader/config.py::Settings` | `max_buy_count` 等有默认值但 config.json 未暴露 | 止损/熔断/成交时滞/重试等新参数全部进 config |
-| P2-6 | 存量 4.6 | `run.py::_run` | 失败只在 `last_run.json`/日志 | 失败/连续 N 天无成交时主动通知（企业微信 / Server酱 / 邮件） |
-| P2-7 | 存量 4.7 | `run.py` | `--db` 批处理覆盖每日账本库、回测覆盖回测库，语义混用易误覆盖 | 回测改 `--bt-db`，加"确认覆盖"保护 |
-| P2-8 | 存量 4.8 | `.env`／`aitrader/config.py::load_settings` | key 为空/占位/异常无启动校验 | 启动时校验并给出明确提示 |
-| P2-9 | 新发现 | `run.py::run_backtest` | `--engine ai` 无 key 时**静默改跑 rule**（有提示但行为与请求不符，易误读结果） | 请求引擎不可用直接报错退出，或明确标注"已降级为 rule"并体现在结果标签 |
-| P2-10 | 存量 3.6 | `run.py::run_backtest`（`AI_CACHE_PATH` 整体读写） | 缓存全量 JSON 读写、非原子（进程崩溃损坏/丢失） | 原子替换（temp + `os.replace`）或落 SQLite |
-| P2-11 | 新发现 | `aitrader/engines/deepseek.py::_call` | `resp.json()` 抛 `JSONDecodeError`（ValueError）时未单独捕获，原始 body 未留痕（v0.2 只处理 KeyError/IndexError/TypeError） | 捕获 ValueError，把响应文本拼进异常供降级留痕 |
-| P2-12 | 新发现 | `aitrader/backtest.py::compute_benchmark` | 基准无手续费，与带成本策略对比略偏袒基准 | 需拍板：基准按佣金折算，或报告标注"基准未计成本" |
-| P2-13 | 新发现 | `aitrader/batch.py::_fetch_policy` | 只跑 rule 引擎也联网拉政策（浪费 + 失败时 exception 噪音） | 引擎集不含 include_policy 引擎时跳过拉取 |
+| P2-1 | 存量 P2-5 | `config.json`／`aitrader/config.py::Settings` | `feedback_n`/`slippage_bps`/`stop_loss_pct`/`take_profit_pct`/`min_confidence_buy`/`temperature`/`system_prompt_extra`/`max_buy_count` 有默认值但 config.json 未暴露，改参数只能靠 CLI | 新参数全部进 config.json（并入 risk 块），CLI 覆盖时打印"已覆盖默认" |
+| P2-2 | 存量 P2-7 | `run.py` | `--db` 在批处理/回测语义混用，误传会污染每日账本 | 回测改 `--bt-db` 独立参数 + "确认覆盖"保护 |
+| P2-3 | 存量 P2-3 | `aitrader/reporter.py`（两处 rcParams） | `Microsoft YaHei` 硬编码，跨平台乱码 | `matplotlib.font_manager` 探测可用中文字体 |
+| P2-4 | 存量 P2-4 | `aitrader/database.py::_connect` | 无 WAL、`trades/decisions` 无 account_id 索引、每操作重开连接 | `PRAGMA journal_mode=WAL` + 索引 + 长连接 |
+| P2-5 | 存量 P2-2 | `aitrader/reporter.py::plot_compare` | 日报资金曲线仍是绝对"总资产（1e6 轴）"，与回测净值图口径不一 | 统一净值起点=1（与 `plot_backtest_curves` 一致） |
+| P2-6 | 存量 P2-8 | `.env`／`load_settings` | key 为空/占位无启动校验 | 启动校验并给出明确提示（回测已做，批处理未做） |
+| P2-7 | 新 | `run.py` | 回测参数覆盖 config 时无冲突告警（如 `--fill close` 但 config `next_open`） | 覆盖时打印"用 X 覆盖 config 的 Y" |
+| P2-8 | 新 | `run.py`／`notify.py` | 无 `--health` 自检命令；"连续 N 天 last_run 陈旧/未跑"不在告警条件里 | 加 `--health`（网络/日历/key/config 一致性/bars 新鲜度/last_run 新鲜度）；`check_alerts` 增加 `last_run_stale_days` |
+| P2-9 | 新 | `scripts/` | 脚本（bench_metrics/check_daily/corr_analysis/stop_grid）无统一入口文档、无测试 | 给脚本加短注释头（用法/依赖/是否烧 API），纳入 README 工具清单 |
 
 ---
 
 ## 5. 落地优先级建议
 
-**第一梯队（改动小、直接堵数据可信度口子，建议立即做）**
-1. 回测报表只渲染本轮引擎账户 + 单测（P0-1，约半小时）
-2. 行情"数据新鲜度守卫" + 日历失败告警（P0-2）
-3. `resp.json()` 异常留痕（P2-11，5 分钟）
+**第一梯队（改动小、直接堵数据可信度/可观测口子，建议立即做）**
+1. P0-1 `--force` 幂等重定义（清当日留痕再跑 / 唯一约束 + 利息幂等）——约 1~2 小时
+2. P0-2 告警跨引擎聚合（5 分钟）
+3. P0-3 日报头部"数据截至"修正（5 分钟）
+4. P0-4 `install_task.ps1` 启动项接 `--catch-up`（1 行）
+5. P0-5 Rank IC 只统计实际成交 buy（10 分钟）
 
-**第二梯队（评测科学性，涉及拍板 / 调研）**
-4. 成交价假设拍板：次日开盘价 or 标注乐观上界（P1-1）
-5. 复权数据调研与接入（P1-2）
-6. 提示词注入技术特征（P1-3）
-7. 政策存档入库 + 决策差异归因（P1-4）
+**第二梯队（评测科学性 / 无人值守稳健性）**
+6. P1-5 回测 run ledger 落库 + `--list-runs`
+7. P1-1 归因/浮盈净佣金口径
+8. P1-3/P1-4 实时行情与交易日历重试
+9. P1-2 `_validate` 补 already_holding
+10. P1-6/P1-7 告警与 last_run 改进
 
-**第三梯队（成本控制 / 功能扩展 / 工程打磨）**
-8. AI 回测成本上限 / 调用提示（P1-6）
-9. 止损 / 仓位进阶（P1-5）
-10. 存量 P2-1~P2-8 逐项打磨
+**第三梯队（工程打磨）**
+11. P2-1~P2-9 逐项（config 暴露 / `--bt-db` / 字体 / WAL / 净值轴 / key 校验 / `--health` / 脚本文档）
+
+> 预测质量轨剩余项（PP-7 政策归档回测、PP-8 标的池扩池）在 `docs/PREDICTION_IMPROVEMENTS.md`，需烧 API / 攒数据，不在本文件重复。
 
 ---
 
 ## 6. 验收清单 + 落地记录
 
-### 已验证（v0.1/v0.2 已落地，2026-08-09 代码复核 + 72 用例全过确认）
+### 已验证（v0.1~v0.16 已落地，2026-08-12 代码复核 + 175 用例全过）
 
-- [x] 日志落盘 `data/logs/app.log` 5MB×5 轮转（`run.py::setup_logging`）
-- [x] `data/last_run.json` 运行留证（`run.py::write_last_run`）
-- [x] 单实例文件锁（`aitrader/lock.py::FileLock`）
-- [x] AI 语义校验写入 `decisions.validation` + 旧库迁移（`deepseek._validate` / `database._init_schema`）
-- [x] `EngineType` 含 `ai_policy`（`models.py`）
-- [x] `--engine ai_policy` 每日批处理正确过滤（`run.py::select_daily_engines`，test_v02 覆盖）
-- [x] 行情拉取失败当日跳过交易 + `last_run` 告警（`batch.run` 返回 `_warning`，test_v02 覆盖）
-- [x] DeepSeek 单条解析容错 + `amount` 字符串兼容（`deepseek._parse` / `_to_float`）
-- [x] DeepSeek / akshare 网络重试（`util.retry_call`，接入行情/政策/AI 三处）
-- [x] 回测 O(log N) 日期索引（`backtest.py` bisect）
-- [x] 回放无前视（`fetch_daily_bars` 加 `end_date`）／ 交易日判断 ／ 同日幂等
-- [x] walk-forward 回测 + 指标 + 基准（`backtest.py`）
-- [x] AI 响应缓存（`deepseek._call`，按 prompt 哈希，ai/ai_policy 共享）
+- [x] 日志落盘 `data/logs/app.log` 5MB×5 轮转／`last_run.json` 运行留证／单实例文件锁（`lock.py`）
+- [x] 同日幂等（快照 + `batch_runs` 标记，N-2 只认 done）／交易日判断／`--date` 回放无前视／`source`(real/replay) 隔离
+- [x] 行情失败当日跳过 + 数据时点硬校验（bars[-1]==决策日，v0.9）／实时行情补全（v0.8）／政策 15:30 截断防前视（v0.9）
+- [x] DeepSeek 单条解析容错／语义校验留痕（validation）／网络重试（retry_call）／响应缓存原子写 + 缓存键含 model/temperature/system/prompt
+- [x] 回测 O(log N)、报表只渲染本轮引擎、基准佣金同口径、`fill_mode:next_open` + `adjust:hfq` 默认
+- [x] 双 bars（真实盘特征复权，N-1）／止损/止盈/滑点/置信度门槛/历史盈亏反馈（PP-5/PP-6/P2-2/PP-4）／现金生息（v0.16）
+- [x] 真实盘 Rank IC 回填 + 日报（分桶胜率/归因复盘/基准对照/数据截至/今日决策）／引擎级异常隔离（A-2）／收盘守卫（A-3）／未来日期拒绝（A-4）／回测 end 默认最近已收盘（A-5）
+- [x] `--catch-up` 补跑（N-9，**⚠️ 未接线到部署脚本，见 P0-4**）／通知（N-10，**⚠️ 只监控第一引擎，见 P0-2**）／bars 缓存兜底（N-11）／API 调用量记账（N-8）
 
-### 验收清单（v0.3 待落地，落地后逐项打勾）
+### 验收清单（本轮待落地，落地后逐项打勾）
 
-- [ ] 回测报表只含本轮引擎账户（先跑双引擎再单引擎回测，断言无陈旧曲线）—— P0-1
-- [ ] 行情非"当日最新"（stale）时当日跳过交易并告警—— P0-2
-- [ ] 交易日历拉取失败在 `last_run.json` / 日志显著告警—— P0-2
-- [ ] `resp.json()` 异常时原始响应留痕—— P2-11
-- [ ] 回测报告 / README 标注成交价假设（收盘价 / 次日开盘价）—— P1-1
-- [ ] 提示词含技术特征字段，回测可复现—— P1-3
-- [ ] `policy_archive` 表从启用日起存档政策文本—— P1-4
-- [ ] AI 回测前提示预计 API 调用次数 / 提供成本上限—— P1-6
-- [ ] `--engine ai` 无 key 时明确报错或标注降级—— P2-9
+- [ ] `--force` / 崩溃重跑不再重复成交与重复计息（同日清留痕重跑，或 唯一约束 + 利息幂等）—— P0-1
+- [ ] 告警跨全部引擎账户聚合判定—— P0-2
+- [ ] 日报头部"数据截至"显示实际 bar_date 且陈旧高亮—— P0-3
+- [ ] 启动项接 `--catch-up`—— P0-4
+- [ ] Rank IC / forward_return 只统计实际成交 buy—— P0-5
+- [ ] 回测 run ledger 落库 + `--list-runs`—— P1-5
+- [ ] 归因/浮盈净佣金口径—— P1-1
+- [ ] `_validate` 补 already_holding—— P1-2
+- [ ] 实时行情 + 交易日历重试—— P1-3/P1-4
+- [ ] `--health` 自检 + last_run 陈旧告警—— P2-8
 
-### 落地记录
+### 落地记录（v0.1~v0.16 里程碑，详见仓库 git log / 各版本评审）
 
-- **v0.1（2026-08-09，已落地）**：日志落盘 + `last_run.json`、单实例锁 `aitrader/lock.py`、AI 语义校验写入 `decisions.validation`、`EngineType` 补 `ai_policy`；新增 `tests/test_reliability.py`（9 用例）。
-- **v0.2（2026-08-09，已落地）**：`ai_policy` 批处理过滤、行情失败当日跳过、DeepSeek 解析容错、网络重试、回测 O(log N)；新增 `tests/test_v02.py`（12 用例），全量 72 用例通过。
-- **v0.3（本轮评审，2026-08-09）**：新增 P0-1（回测报表混入历史残留账户）、P0-2（日历降级 + 无数据新鲜度守卫）、P1-6（AI 回测成本无上限）、P2-9~13（引擎降级语义 / 缓存原子写 / JSONDecode 留痕 / 基准成本 / 政策拉取时机）；其余为 v0.1/v0.2 存量的未落地短板。
+- **v0.1~v0.2（08-09）**：日志/last_run/单实例锁/语义校验留痕；ai_policy 批处理过滤、行情失败跳过、DeepSeek 解析容错、网络重试、回测 O(log N)。
+- **v0.3~v0.4（08-09）**：回测报表只渲染本轮引擎、数据新鲜度守卫 + 日历告警、逐标的陈旧剔除 + bar_date、`batch_runs` 防崩溃重复成交、execution_result 回填、日期参数校验。
+- **v0.5~v0.7（08-09）**：成交假设校准（PP-1）、system 三段式 + 缓存键修正（PP-3）、特征注入（PP-2）、置信度门槛 + Rank IC 闭环（PP-4）、复权接入回测、网络硬超时 + IPv6 修复（P1-9）。
+- **v0.8~v0.9（08-10）**：实时行情补全（治新浪滞后 1 日）、政策 15:30 截断防前视、行情"当日硬校验"。
+- **v0.10~v0.12（08-10）**：真实盘接入最优配置（A-1）、未来日期拒绝（A-4）、引擎异常隔离（A-2）、收盘守卫（A-3）、回测 end 默认最近已收盘（A-5）、配置对齐（P2-1）、滑点（P2-2）、真实盘 Rank IC 回填（B-1）、日报升级（B-2）、`batch_runs` 只认 done（N-2）、`source` 隔离（N-12）、信心分桶（N-4）。
+- **v0.13~v0.14（08-11）**：双 bars 真实盘特征复权（N-1）、成交口径说明（N-3）、归因标签 + 复盘（N-5）、`--market-env` 接线（N-6）、API 记账（N-8）、`--catch-up`（N-9）、通知（N-10）、bars 缓存兜底（N-11）。
+- **v0.15（08-11）**：烧 API A/B——市场环境注入开启（夏普 0.98→1.57）、历史盈亏反馈可选、止损/止盈网格无有效组合保留默认关、标的池相关性 0.75~0.87 高度冗余（完整结论在 PREDICTION 文档）。
+- **v0.16（08-12）**：现金生息（货基假设，空仓也被正确计价）。
+- **v0.17（08-12，落地本轮评审 P0 + 轻量 P1，测试 181 全过）**：**P0-1** 计息幂等（`account_states.last_interest_date`，`--force`/崩溃重跑不再双计息）；**P0-2** 告警跨全部引擎账户独立判定（AI 空转/回撤也能触发）；**P0-3** 日报"数据截至"修正（取所有账户 bar_date 最大值，陈旧时头部高亮 ⚠️）；**P0-4** 部署启动项接入 `run.py --catch-up`（连续关机缺口真正可补）；**P0-5** 回测 Rank IC 只收实际成交 buy、`get_uncalibrated_buys` 排除被拒 buy；**P1-1** 归因/已平仓配对改为净口径（扣双边佣金）；**P1-2** 已持仓再下 buy 引擎校验标 `already_holding`；**P1-3** 实时行情接口接入 `retry_call` 重试；**P1-6** 失败时 `last_run.json` 保留上次成功的 engine_results。测试 `test_v17.py` 6 条 + 更新旧测试净口径断言。

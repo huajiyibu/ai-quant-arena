@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS account_states (
     account_id INTEGER PRIMARY KEY,
     state_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    last_interest_date TEXT
 );
 CREATE TABLE IF NOT EXISTS trades (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -164,6 +165,9 @@ class Database:
                 conn.execute("ALTER TABLE daily_snapshots ADD COLUMN bar_date TEXT")
             if "source" not in s_cols:
                 conn.execute("ALTER TABLE daily_snapshots ADD COLUMN source TEXT DEFAULT 'real'")
+            a_cols = {r[1] for r in conn.execute("PRAGMA table_info(account_states)").fetchall()}
+            if "last_interest_date" not in a_cols:
+                conn.execute("ALTER TABLE account_states ADD COLUMN last_interest_date TEXT")
 
     # ---- accounts ----
     def create_account(self, name: str, engine_type: EngineType, initial_capital: float) -> int:
@@ -219,6 +223,22 @@ class Database:
         if not row:
             return None
         return state_from_dict(json.loads(row["state_json"]))
+
+    def get_last_interest_date(self, account_id: int) -> str | None:
+        """该账户最近一次计息的账本日期（P0-1 计息幂等；无记录返回 None）"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_interest_date FROM account_states WHERE account_id=?",
+                (account_id,),
+            ).fetchone()
+        return row["last_interest_date"] if row else None
+
+    def set_last_interest_date(self, account_id: int, date_str: str | None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE account_states SET last_interest_date=? WHERE account_id=?",
+                (date_str, account_id),
+            )
 
     # ---- trades ----
     def add_trade(self, account_id: int, trade: Trade) -> None:
@@ -292,7 +312,8 @@ class Database:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT date, symbol, confidence FROM decisions "
-                "WHERE account_id=? AND action='buy' AND forward_return IS NULL",
+                "WHERE account_id=? AND action='buy' AND forward_return IS NULL "
+                "AND (execution_result IS NULL OR execution_result LIKE 'executed:buy%')",
                 (account_id,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -356,6 +377,8 @@ class Database:
         self.save_state(
             account_id, AccountState(initial_capital=initial, cash=initial)
         )
+        # P0-1：清计息标记（回测重来从无标记开始，逐日顺序计息）
+        self.set_last_interest_date(account_id, None)
 
     def has_snapshot(self, account_id: int, date: datetime) -> bool:
         """该账户在指定日期是否已有净值快照（同日幂等判断用）"""

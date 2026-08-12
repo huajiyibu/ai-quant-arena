@@ -84,6 +84,19 @@ def write_last_run(meta: dict) -> None:
         "ok": meta.get("ok", True),
         "error": meta.get("error", ""),
     }
+    # P1-6：失败路径保留上次成功的 engine_results（便于对比"上次正常 vs 这次失败"）
+    if not meta.get("ok") and not payload["engine_results"]:
+        last_run_path = ROOT / "data" / "last_run.json"
+        prev = {}
+        if last_run_path.exists():
+            try:
+                prev = json.loads(last_run_path.read_text(encoding="utf-8"))
+            except Exception:
+                prev = {}
+        if prev.get("engine_results"):
+            payload["engine_results"] = prev["engine_results"]
+            payload["prev_ok"] = prev.get("ok", True)
+            payload["prev_date"] = prev.get("date", "")
     last_run_path = ROOT / "data" / "last_run.json"
     last_run_path.parent.mkdir(parents=True, exist_ok=True)
     last_run_path.write_text(
@@ -614,32 +627,28 @@ def _maybe_notify(settings, db, engines, results, date) -> None:
     error = results.get("_warning", "") or next(
         (r.get("error", "") for r in results.values() if r.get("error")), ""
     )
-    snapshots: list[dict] = []
-    trades_count = 0
-    acc = None
+    # P0-2：跨全部引擎账户独立判定（AI 空转/回撤也要能触发告警）
+    alerts_all: list[str] = []
+    n = settings.notify.idle_days
+    cutoff = datetime.combine(date.date() - timedelta(days=n * 2), datetime.min.time())
     for et in engines:
         a = db.get_account_by_engine(et)
-        if a:
-            acc = a
-            break
-    if acc:
-        snapshots = db.get_snapshots(acc["id"])
-        n = settings.notify.idle_days
-        cutoff = datetime.combine(date.date() - timedelta(days=n * 2), datetime.min.time())
-        trades = db.get_trades(acc["id"])
+        if not a:
+            continue
+        snaps = db.get_snapshots(a["id"])
+        if not snaps:
+            continue
         recent_days = {
-            t["date"] for t in trades
+            t["date"] for t in db.get_trades(a["id"])
             if datetime.strptime(t["date"], "%Y-%m-%d") >= cutoff
         }
-        trades_count = len(recent_days)
-    alerts = check_alerts(
-        ok,
-        error,
-        snapshots,
-        trades_count,
-        idle_days=settings.notify.idle_days,
-        max_drawdown=settings.notify.max_drawdown_alert,
-    )
+        alerts_all.extend(
+            check_alerts(
+                ok, error, [snaps[-1]], len(recent_days),
+                idle_days=n, max_drawdown=settings.notify.max_drawdown_alert,
+            )
+        )
+    alerts = list(dict.fromkeys(alerts_all))  # 去重保序
     if alerts:
         send_notify("\n".join(alerts), settings.notify.webhook_url)
 

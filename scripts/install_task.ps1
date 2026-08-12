@@ -24,7 +24,7 @@ $startup = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut("$startup\AITrader.lnk")
 $lnk.TargetPath = $pythonw
-$lnk.Arguments = '"D:\下载的堆砌\vnpy-4.4.0\ai_demo\ai_trader\run.py"'
+$lnk.Arguments = '"D:\下载的堆砌\vnpy-4.4.0\ai_demo\ai_trader\run.py" --catch-up'
 $lnk.WorkingDirectory = "D:\下载的堆砌\vnpy-4.4.0\ai_demo\ai_trader"
 $lnk.Description = "AI 交易每日自动运行（登录时）"
 $lnk.Save()

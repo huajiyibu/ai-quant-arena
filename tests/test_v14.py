@@ -96,10 +96,10 @@ def test_attribute_trades():
     ]
     attr = attribute_trades(trades)
     assert attr["趋势"]["n"] == 1
-    assert attr["趋势"]["pnl"] == pytest.approx((4.2 - 4.0) * 1000)
+    assert attr["趋势"]["pnl"] == pytest.approx((4.2 * 0.99975 - 4.0 * 1.00025) * 1000)
     assert attr["趋势"]["win_rate"] == 1.0
     assert attr["其他"]["n"] == 1
-    assert attr["其他"]["pnl"] == pytest.approx((1.8 - 2.0) * 500)
+    assert attr["其他"]["pnl"] == pytest.approx((1.8 * 0.99975 - 2.0 * 1.00025) * 500)
     assert attr["其他"]["win_rate"] == 0.0
 
 

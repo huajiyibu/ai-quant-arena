@@ -83,6 +83,7 @@ def build_daily_report(
 
     cards: list[str] = []
     data_until = ""
+    today_str = datetime.now().strftime("%Y-%m-%d")
     for acc in db.get_accounts():
         snaps = db.get_snapshots(acc["id"])
         if not snaps:
@@ -174,11 +175,10 @@ def build_daily_report(
         else:
             dec_line = ""
 
-        # B-2/F-11：数据截至日期（异常时高亮）
+        # B-2/F-11：数据截至日期（P0-3：无论新旧都取 max，陈旧由头部高亮）
         bar_date = last.get("bar_date") or today
         bar_note = f"（估值截至 {bar_date}）" if bar_date != today else ""
-        if bar_date > today:
-            data_until = max(data_until, bar_date)
+        data_until = max(data_until, bar_date)
 
         cards.append(
             f"""<div class="card {css}">
@@ -222,6 +222,11 @@ def build_daily_report(
     img_b64 = ""
     if chart_path.exists():
         img_b64 = base64.b64encode(chart_path.read_bytes()).decode()
+    # P0-3：数据截至陈旧（<今天）时头部高亮警示，避免误以为数据是新
+    data_disp = data_until or "—"
+    data_note = (
+        f"（⚠️ 陈旧：未到 {today_str}）" if data_until and data_until < today_str else ""
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -239,7 +244,7 @@ def build_daily_report(
   .foot {{ color: #95a5a6; font-size: 12px; margin-top: 20px; }}
 </style></head><body>
 <h1>📊 AI 交易日报</h1>
-<p>生成时间：{datetime.now():%Y-%m-%d %H:%M} ｜ 数据截至：{data_until or '—'}</p>
+<p>生成时间：{datetime.now():%Y-%m-%d %H:%M} ｜ 数据截至：{data_disp}{data_note}</p>
 {bench_line}
 {cards_html}
 <h2>多引擎资金曲线对比</h2>

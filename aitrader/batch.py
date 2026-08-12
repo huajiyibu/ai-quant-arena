@@ -287,8 +287,12 @@ class BatchRunner:
             if bars
         }
         state = refresh_prices(state, prices)
-        # 现金生息（货基假设）：闲置现金按日利率计息，AI 看到的现金含累计利息
-        state = apply_cash_interest(state, self.settings.cash_interest_rate / 252)
+        # 现金生息（P0-1 幂等）：仅当日未计息过才计，防 --force/崩溃重跑双计息
+        last_int = self.db.get_last_interest_date(account_id)
+        today_str = date.strftime("%Y-%m-%d")
+        if last_int is None or last_int < today_str:
+            state = apply_cash_interest(state, self.settings.cash_interest_rate / 252)
+            self.db.set_last_interest_date(account_id, today_str)
 
         # 决策（异常降级）
         policy_text = self._policy_text if getattr(engine, "include_policy", False) else ""

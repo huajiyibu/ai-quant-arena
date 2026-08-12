@@ -324,6 +324,11 @@ class DeepSeekEngine(DecisionEngine):
                 d.validation = "ok"
                 continue
             if d.action == "buy":
+                # P1-2：已持仓再下 buy → 标记（与 execute 的 risk_rejected:已持仓 口径一致）
+                if d.symbol in ctx.account.positions:
+                    d.valid = False
+                    d.validation = "already_holding"
+                    continue
                 if not (0.0 <= d.confidence <= 1.0):
                     d.valid = False
                     d.validation = "invalid_confidence"

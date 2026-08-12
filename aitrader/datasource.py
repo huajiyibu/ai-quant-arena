@@ -124,13 +124,18 @@ class AkShareDataSource:
         上层降级为仅用历史数据。
         """
         import requests
+        from .util import retry_call
 
         prefix = self._EXCHANGE_PREFIX.get(exchange.upper(), "sh")
         try:
-            r = requests.get(
-                f"https://hq.sinajs.cn/list={prefix}{symbol}",
-                headers={"Referer": "https://finance.sina.com.cn/"},
-                timeout=10,
+            # P1-3：接入重试（指数退避），偶发抖动不再整日剔除该标的
+            r = retry_call(
+                lambda: requests.get(
+                    f"https://hq.sinajs.cn/list={prefix}{symbol}",
+                    headers={"Referer": "https://finance.sina.com.cn/"},
+                    timeout=10,
+                ),
+                label=f"实时{symbol}",
             )
             r.encoding = "gbk"
             text = r.text
