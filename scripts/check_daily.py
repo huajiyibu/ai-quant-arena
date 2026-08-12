@@ -11,6 +11,13 @@ DB = Path(__file__).resolve().parent.parent / "data" / "aitrader.db"
 
 
 def main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
+    args = ap.parse_args()
+    check_date = args.date
+
     conn = sqlite3.connect(DB)
     print(f"=== 数据库: {DB}  (现在 {datetime.now():%Y-%m-%d %H:%M}) ===\n")
 
@@ -37,12 +44,13 @@ def main() -> None:
     ).fetchall():
         print(f"  {r[0]:>9} | {r[1]}")
 
-    # 3. 今日决策
-    print("\n--- 今日决策 (2026-08-11) ---")
+    # 3. 指定日决策
+    print(f"\n--- 决策 ({check_date}) ---")
     decs = conn.execute(
         """SELECT engine_type, symbol, action, amount, confidence, reason, fallback,
                   validation, execution_result
-           FROM decisions WHERE date='2026-08-11' ORDER BY engine_type"""
+           FROM decisions WHERE date=? ORDER BY engine_type""",
+        (check_date,),
     ).fetchall()
     if not decs:
         print("  (无决策记录)")
@@ -56,9 +64,9 @@ def main() -> None:
     print("\n--- AI prompt 配置生效 ---")
     for et in ("ai", "ai_policy"):
         row = conn.execute(
-            "SELECT prompt_json FROM decisions WHERE date='2026-08-11' AND engine_type=? "
+            "SELECT prompt_json FROM decisions WHERE date=? AND engine_type=? "
             "AND prompt_json IS NOT NULL LIMIT 1",
-            (et,),
+            (check_date, et),
         ).fetchone()
         if not row:
             print(f"  {et}: 无 prompt（今天没决策？）")
@@ -75,7 +83,39 @@ def main() -> None:
                 print(f"      样例: {line[:80]}")
                 break
 
-    # 5. 最近成交（确认 0 成交是否正常）
+    # 5. 各账户当前持仓（账本状态）
+    print("\n--- 各账户当前持仓 ---")
+    for r in conn.execute(
+        "SELECT id, engine_type, name FROM accounts ORDER BY engine_type"
+    ).fetchall():
+        acc_id, et, name = r
+        row = conn.execute(
+            "SELECT state_json FROM account_states WHERE account_id=? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (acc_id,),
+        ).fetchone()
+        if not row:
+            print(f"  {et:>9}: (无状态)")
+            continue
+        try:
+            st = json.loads(row[0])
+        except Exception:
+            print(f"  {et:>9}: (状态解析失败)")
+            continue
+        pos = st.get("positions", {})
+        if not pos:
+            print(f"  {et:>9}: 空仓（现金 {st.get('cash', 0):,.0f}）")
+            continue
+        parts = []
+        for p in pos.values():
+            cost = p.get("cost_price", 0)
+            last = p.get("last_price", cost)
+            vol = p.get("volume", 0)
+            pnl = (last - cost) * vol
+            parts.append(f"{p.get('symbol')} {vol}股 成本{cost:.3f} 现价{last:.3f} 浮盈{pnl:+,.0f}")
+        print(f"  {et:>9}: " + " | ".join(parts) + f" | 现金 {st.get('cash', 0):,.0f}")
+
+    # 6. 最近成交（跨账户）
     print("\n--- 最近 5 笔成交（跨账户） ---")
     for r in conn.execute(
         """SELECT a.engine_type, t.date, t.symbol, t.action, t.price, t.volume, t.reason
