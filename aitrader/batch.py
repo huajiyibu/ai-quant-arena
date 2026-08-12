@@ -15,7 +15,7 @@ from .database import Database
 from .datasource import DataSource, PolicySource
 from .engines.base import DecisionContext, DecisionEngine, EngineResult
 from .models import AccountState, Bar, Decision, EngineType
-from .portfolio import apply_stop_rules, execute_decisions, refresh_prices
+from .portfolio import apply_cash_interest, apply_stop_rules, execute_decisions, refresh_prices
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +287,8 @@ class BatchRunner:
             if bars
         }
         state = refresh_prices(state, prices)
+        # 现金生息（货基假设）：闲置现金按日利率计息，AI 看到的现金含累计利息
+        state = apply_cash_interest(state, self.settings.cash_interest_rate / 252)
 
         # 决策（异常降级）
         policy_text = self._policy_text if getattr(engine, "include_policy", False) else ""

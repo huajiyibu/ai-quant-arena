@@ -66,6 +66,21 @@ def refresh_prices(state: AccountState, prices: dict[str, float]) -> AccountStat
     )
 
 
+def apply_cash_interest(state: AccountState, daily_rate: float) -> AccountState:
+    """给闲置现金按日利率生息（货币基金假设，做全模拟）。返回新状态。
+
+    daily_rate = 年化利率 / 252（交易日）。无现金或利率<=0 时原样返回。
+    """
+    if state.cash <= 0 or daily_rate <= 0:
+        return state
+    interest = round(state.cash * daily_rate, 2)
+    return AccountState(
+        initial_capital=state.initial_capital,
+        cash=round(state.cash + interest, 2),
+        positions=dict(state.positions),
+    )
+
+
 def apply_stop_rules(
     state: AccountState, prices: dict[str, float], risk: RiskConfig
 ) -> list[Decision]:

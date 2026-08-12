@@ -71,6 +71,7 @@ class Settings(BaseModel):
     adjust: str = "none"  # 回测行情复权："none" 原始 | "hfq" 后复权（P2-1，默认走 config）
     feature_inject: bool = False  # 提示词注入技术特征（PP-2；建议配合 adjust=hfq 使用）
     market_env_inject: bool = False  # 提示词注入市场环境（B-3，探索性，默认关）
+    cash_interest_rate: float = Field(default=0.017, ge=0, le=0.10)  # 闲置现金年化利率（货基假设，做全模拟）
     feedback_n: int = Field(default=0, ge=0, le=20)  # 历史盈亏反馈笔数（0=关闭，PP-6）
     initial_capital: float = Field(default=1_000_000, gt=0)
     lookback_days: int = Field(default=20, ge=5, le=120)

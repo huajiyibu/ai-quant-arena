@@ -18,7 +18,7 @@ from .database import Database
 from .datasource import DataSource
 from .engines.base import DecisionContext, DecisionEngine, EngineResult
 from .models import AccountState, Bar, Decision
-from .portfolio import apply_stop_rules, execute_decisions, refresh_prices
+from .portfolio import apply_cash_interest, apply_stop_rules, execute_decisions, refresh_prices
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +345,8 @@ class Backtester:
 
             prices = {sym: bars[-1].close for sym, bars in bars_map.items()}
             state = refresh_prices(state, prices)
+            # 现金生息（货基假设）：逐日计息，模拟真实账户闲置资金收益
+            state = apply_cash_interest(state, self.settings.cash_interest_rate / 252)
 
             ctx = DecisionContext(
                 date=day,
