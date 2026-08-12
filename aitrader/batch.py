@@ -288,10 +288,13 @@ class BatchRunner:
         }
         state = refresh_prices(state, prices)
         # 现金生息（P0-1 幂等）：仅当日未计息过才计，防 --force/崩溃重跑双计息
+        interest_today = 0.0
         last_int = self.db.get_last_interest_date(account_id)
         today_str = date.strftime("%Y-%m-%d")
         if last_int is None or last_int < today_str:
-            state = apply_cash_interest(state, self.settings.cash_interest_rate / 252)
+            daily_rate = self.settings.cash_interest_rate / 252
+            interest_today = round(state.cash * daily_rate, 2)
+            state = apply_cash_interest(state, daily_rate)
             self.db.set_last_interest_date(account_id, today_str)
 
         # 决策（异常降级）
@@ -353,6 +356,7 @@ class BatchRunner:
             new_state,
             bar_date=actual_bar_date.strftime("%Y-%m-%d"),
             source=source,
+            interest=interest_today,
         )
         # B-1：回填已满 20 交易日窗口的 buy 决策 forward return（真实盘 Rank IC 校准）。
         # N-1：用复权行情算收益（与回测口径一致，含分红）。

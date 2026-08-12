@@ -101,6 +101,7 @@ def build_daily_report(
             holdings = "空仓"
         trades = db.get_trades(acc["id"])
         css = "green" if last["pnl"] >= 0 else "red"
+        interest_total = sum(s.get("interest") or 0.0 for s in snaps)
 
         # B-1：真实盘 Rank IC 校准（AI 引擎信心是否有预测力）
         ic_line = ""
@@ -186,7 +187,7 @@ def build_daily_report(
             <p class="big">累计盈亏 <b>{last['pnl']:+,.2f} 元</b>（{pct:+.2f}%）</p>
             <p>总资产 {last['total_assets']:,.2f} 元 ｜ 现金 {last['cash']:,.2f} 元 {bar_note}</p>
             <p>持仓：{holdings}</p>
-            <p>累计成交 {len(trades)} 笔</p>
+            <p>累计成交 {len(trades)} 笔 ｜ 货基利息累计 {interest_total:+,.2f} 元</p>
             {dec_line}
             {ic_line}
             {bucket_html}

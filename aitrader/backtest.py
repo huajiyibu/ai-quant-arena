@@ -346,7 +346,9 @@ class Backtester:
             prices = {sym: bars[-1].close for sym, bars in bars_map.items()}
             state = refresh_prices(state, prices)
             # 现金生息（货基假设）：逐日计息，模拟真实账户闲置资金收益
-            state = apply_cash_interest(state, self.settings.cash_interest_rate / 252)
+            daily_rate = self.settings.cash_interest_rate / 252
+            interest_today = round(state.cash * daily_rate, 2)
+            state = apply_cash_interest(state, daily_rate)
 
             ctx = DecisionContext(
                 date=day,
@@ -407,7 +409,7 @@ class Backtester:
 
             state = new_state
             self.db.save_state(account_id, state)
-            self.db.add_snapshot(account_id, day, state)
+            self.db.add_snapshot(account_id, day, state, interest=interest_today)
 
         snapshots = self.db.get_snapshots(account_id)
         trades = self.db.get_trades(account_id)
