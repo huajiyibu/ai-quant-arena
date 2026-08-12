@@ -644,7 +644,7 @@ def _maybe_notify(settings, db, engines, results, date) -> None:
         }
         alerts_all.extend(
             check_alerts(
-                ok, error, [snaps[-1]], len(recent_days),
+                ok, error, snaps, len(recent_days),
                 idle_days=n, max_drawdown=settings.notify.max_drawdown_alert,
             )
         )
