@@ -1,6 +1,4 @@
-# AI Quant Arena
-
-> **AI 量化竞技场** —— 用虚拟钱评测 AI 量化决策的三引擎仿真交易系统。规则 / AI·纯价格 / AI·价格+政策 三引擎同台对决，支持 walk-forward 回测与全量留痕。
+# AI 自动交易体验机
 
 一个**三引擎对比**的仿真量化交易系统：`DeepSeek 大模型`（纯价格 / 价格+政策）与 `内置规则` 各用一个独立虚拟账户（默认 100 万虚拟资金），在同一份行情上并行交易，长期留痕，用于**客观评估 AI 决策的真实水平**。
 
@@ -80,9 +78,24 @@ python run.py --engine rule       # 仅规则引擎
 python run.py --engine ai         # 仅 AI·纯价格（需 .env 配 Key）
 python run.py --engine ai_policy  # 仅 AI·价格+政策
 python run.py --date 2026-08-06   # 指定交易日（回放，只取截至该日行情，无前视偏差）
-python run.py --force             # 该日已处理过也强制重跑
-python run.py --report-only       # 只出报表
+python run.py --force             # 该日已处理过也强制重跑（计息/成交均幂等，不重复）
+python run.py --report-only       # 只出报表（不重新交易）
+python run.py --catch-up [N]      # 补跑缺失交易日（最近快照次日→昨天，最多 N 个交易日，默认 5；幂等）
+python run.py --health            # （规划中）自检网络/日历/key/数据新鲜度
 ```
+
+**回测与实验参数**（`--backtest` 时生效）：
+
+```
+python run.py --backtest --engine ai --start 2025-06-01 --end 2026-08-01 \
+  --feature-inject --adjust hfq --market-env --feedback 5 \
+  --stop-loss 0.08 --take-profit 0.2 --slippage 10 --min-confidence 0.6
+```
+
+- `--fill close|next_open` 成交假设；`--commission-mult` 佣金倍率；`--temperature` / `--model` 采样
+- `--feature-inject` 特征注入；`--adjust hfq` 复权；`--market-env` 市场环境（默认开，用 `--market-env` 仅回测对照）
+- `--feedback N` 历史盈亏反馈笔数；`--stop-loss` / `--take-profit` 止损止盈；`--slippage` 滑点 bps
+- `--min-confidence` 买入置信度门槛；`--record-decisions` 回测落库决策；`--benchmark` 指定基准代码
 
 ## 回测评估
 
@@ -98,27 +111,11 @@ python run.py --backtest --benchmark 510300                     # 指定基准�
 
 > 回测**默认跳过 `AI·政策版`**：回测无法获取历史政策，政策版会退化为纯价格版、产生重复曲线误导；如确需回测请用 `--engine ai_policy`（会给出提示）。
 
-### 怎么看 AI vs 基准（别被"跑输基准"误导）
-
-基准是**满仓买入持有单标的**（吃满波动）；AI 是**大部分时间空仓、择时下注**（保守）。两者承担的风险完全不同，比**绝对收益**不公平，应比**单位风险收益（夏普）和最大回撤**。
-
-v0.15 实测（2025-06~2026-08，510300）：基准 +19.58% / 夏普 1.18 / 回撤 8.41%（年化波动约 14%）；AI+市场环境 +9.52% / **夏普 1.57** / **回撤 2.86%**。即 AI 用约一半收益换来了**仅 1/3 的回撤、更高的夏普**——它不赌单边、回撤小 = 复利损失小。可用 `python scripts/bench_metrics.py` 复算。注意样本少，结论置信度有限，需真实盘积累确认。
-
 ## 政策参考
 
 `AI·价格+政策` 引擎每天收盘后拉取财联社宏观政策快讯（央行/证监会/降息/监管等关键词过滤），连同行情一起喂给 DeepSeek 综合决策，与纯价格版本对比，用于客观评估“政策信息对 AI 决策是否有帮助”。
 
 关键词可在 `config.json` 的 `policy.keywords` 中调整。
-
-## 成交与配置口径
-
-- **成交时点**：真实盘按**决策日收盘价**成交（每日 15:30 决策后按当日收盘结算，滑点默认 0）；回测的 `fill_mode: next_open`（次日开盘成交）+ `slippage` 是**更严苛**的假设，因此真实盘表现不应优于回测。该说明同时写入 `data/last_run.json` 的 `fill_note` 字段。
-- **市场环境注入（B-3）**：`config.json` 的 `market_env_inject` 已开启——A/B 验证（2025-06~2026-08）：夏普 0.98→1.57、回撤 10.0%→2.9%，**更稳但绝对收益略降**。回测可用 `--market-env` 关闭做对照。
-- **历史盈亏反馈（PP-6）**：`--feedback N` 让模型参考近 N 笔已平仓交易复盘（A/B：夏普提升但收益下降、换手升高；默认关，可按需开启）。
-- **止损/止盈（PP-5）**：`RiskConfig.stop_loss_pct` / `take_profit_pct` 默认 0（关）——rule 网格（2021-2024，12 组合）显示无组合同时改善夏普与回撤，**按规则保留无止损为默认**。
-- **现金生息（v0.16）**：`cash_interest_rate`（年化，默认 1.7% 货基口径）——闲置现金每个交易日按 `rate/252` 计息（真实盘 + 回测都算），模拟真实账户空仓资金放在货基/活期里的收益。空仓的"守"从此被正确计价；**日报会单独展示"货基利息累计"**（v0.18，每日快照记录当日利息）。
-- **通知（N-10）**：`config.json` 的 `notify` 块默认关闭；填入 `webhook_url`（Server酱/通用 webhook）并设 `enabled: true` 后，批处理失败 / 连续无成交 / 净值回撤超阈值会推送告警（推送失败不阻塞主流程）。
-- **补跑（N-9）**：`python run.py --catch-up` 可从最近快照次日补齐缺失交易日（幂等，不重复成交）。
 
 ## 测试
 

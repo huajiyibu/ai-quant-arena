@@ -1,10 +1,10 @@
-# AI 自动交易体验机 · 概要设计 (HLD)
+# AI Quant Arena · 概要设计 (HLD)
 
 | 项目 | 内容 |
 |---|---|
-| 版本 | 1.2 |
-| 日期 | 2026-08-08 |
-| 对应 | SRS v1.2 |
+| 版本 | 1.3 |
+| 日期 | 2026-08-12 |
+| 对应 | SRS v1.3 |
 
 ## 1. 架构总览
 
@@ -16,11 +16,12 @@
 ├─────────────────────────────────────────────────┤
 │ 应用层    batch.py (流程编排) · reporter.py (报表) │
 ├─────────────────────────────────────────────────┤
-│ 领域层    engines/ (决策) · risk.py (风控)         │
-│           portfolio.py (账本) · datasource.py     │
+│ 领域层    engines/ (决策) · risk.py (风控) · features.py (指标) │
+│           portfolio.py (账本+计息+止损) · adjfactor.py (复权)  │
+│           attribution.py (归因) · notify.py (告警) · datasource │
 ├─────────────────────────────────────────────────┤
-│ 基础设施  database.py (SQLite) · config.py (配置)  │
-│           logging · .env (密钥)                   │
+│ 基础设施  database.py (SQLite) · config.py (配置) · lock.py   │
+│           util.py (重试) · logging · .env (密钥)              │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -40,7 +41,12 @@
 | `engines/deepseek.py` | DeepSeek 调用、提示词构造、JSON 解析、降级 | 继承 `DecisionEngine`；`include_policy=True` 时注入政策快讯 |
 | `engines/rule.py` | 内置双均线基线 | 继承 `DecisionEngine` |
 | `risk.py` | 风控校验（纯函数） | `validate_buy(...) -> AdjustResult` |
-| `portfolio.py` | 账本状态与交易执行（纯函数） | `apply_trade(state, trade) -> state` |
+| `portfolio.py` | 账本状态与交易执行（纯函数） | `apply_trade(state, trade)`；`refresh_prices`；`apply_cash_interest`（计息）；`apply_stop_rules`（止损/止盈强制卖） |
+| `features.py` | 确定性技术指标（纯函数） | `compute_features(bars) -> dict`（MA/RSI/动量/波动率/距高/量比，无前视） |
+| `adjfactor.py` | 后复权式调整（分红加回） | `compute_adjusted_bars(bars, dividends)`；`fetch_dividends`（新浪，进程内缓存） |
+| `attribution.py` | 归因复盘（纯函数） | `parse_tag` / `attribute_trades`（按 reason 标签聚合已平仓净盈亏）/ `closed_trade_pairs`（历史反馈用） |
+| `notify.py` | 告警判定与推送 | `check_alerts`（失败/无成交/回撤）；`send_notify`（webhook，失败不阻塞） |
+| `lock.py` / `util.py` | 单实例锁 / 指数退避重试 | `FileLock.acquire()`；`retry_call(func, label)` |
 | `database.py` | SQLite 仓储 | `AccountRepo` / `TradeRepo` / `SnapshotRepo` / `DecisionRepo` |
 | `batch.py` | 每日流程编排 | `run_batch(date, engine_mode) -> Report` |
 | `backtest.py` | walk-forward 回测 | `Backtester.run() -> {snapshots, trades, metrics}`；`compute_metrics` / `compute_benchmark` 纯函数 |
@@ -51,32 +57,38 @@
 
 ```
 accounts(id PK, name, engine_type, initial_capital, created_at)
-daily_snapshots(id PK, account_id FK, date, cash, total_assets, pnl, UNIQUE(account_id, date))
+account_states(account_id PK, state_json, updated_at, last_interest_date)  # last_interest_date = 计息幂等标记
+batch_runs(account_id, date, status, created_at, UNIQUE(account_id, date))  # 崩溃重跑幂等（status=done 才算完成）
+daily_snapshots(id PK, account_id FK, date, bar_date, source, interest, cash, total_assets, pnl, UNIQUE(account_id, date))
 trades(id PK, account_id FK, date, symbol, name, action, price, volume, amount, reason, created_at)
-decisions(id PK, account_id FK, date, engine_type, action, symbol, amount,
-          reason, prompt_json, raw_output_json, created_at)
+decisions(id PK, account_id FK, date, engine_type, symbol, action, amount, confidence, reason,
+          fallback, validation, execution_result, forward_return, prompt_json, raw_output_json, created_at)
 bars(id PK, symbol, date, open, high, low, close, volume, UNIQUE(symbol, date))
 ```
 
 - 多引擎 = 每个引擎一个 `accounts` 行（`engine_type` 区分 `rule` / `ai` / `ai_policy`）。
+- `daily_snapshots.bar_date` = 实际行情日期（数据时点审计，NFR8）；`source` = real/replay（回放隔离）；`interest` = 当日货基利息。
+- `decisions.confidence/validation/execution_result/forward_return` = 置信度、语义校验、执行结果回填、Rank IC 校准。
 - `decisions.prompt_json` / `raw_output_json` 保存喂给引擎的完整行情与引擎原始输出，满足审计/回放（NFR2）。
 
 ## 4. 核心流程（每日批处理时序）
 
 ```
 run_batch(date, force)
-  0. 交易日判断：非交易日直接跳过（不产生快照）
-  1. 拉取行情 (datasource, 截至 date) → 写入 bars 表
+  0. 交易日判断（非交易日跳过）＋ 收盘后守卫（<15:00 拒绝当日结算）＋ 数据时点硬校验（bars[-1]==date，陈旧剔除）
+  1. 拉取行情：原始 bars + 本地复权 adjusted（双 bars，特征用复权/估值成交用原始）→ 写入 bars 表
   2. 对每个引擎 (rule / ai / ai_policy):
-       a. 读取该引擎账本状态 (database)
-       b. 幂等：该账户该日已有快照则跳过（force=True 强制重跑）
-       c. 构造决策上下文 (行情 + 持仓 + 现金)
-       d. engine.decide(ctx) → decisions
-       e. 决策落库 (含 prompt/raw)
-       f. risk 校验 → 合法交易
-       g. portfolio.apply_trade 执行 → 新状态
-       h. 状态落库 + 写 daily_snapshot + trades
-  3. reporter 生成对比报表
+       a. 读取账本状态
+       b. 幂等：快照 或 batch_runs=done 则跳过；崩溃遗留 running 无快照可重跑
+       c. 构造决策上下文（原始行情 + 复权特征 + 持仓 + 现金 + 可选政策/历史盈亏反馈）
+       d. engine.decide(ctx) → decisions（含 confidence、[标签] reason）
+       e. 决策落库（含 prompt/raw/validation）
+       f. risk 校验 + 可选止损/止盈强制卖出（apply_stop_rules）
+       g. execute 执行 → 新状态
+       h. 现金生息（last_interest_date 幂等）
+       i. 状态落库 + 写 daily_snapshot（含 bar_date/source/interest）+ trades + execution_result 回填
+       j. Rank IC 回填（仅实际成交 buy，满 20 交易日窗口）
+  3. 告警通知（可选，跨全部引擎判定）＋ reporter 生成对比日报
 ```
 
 ## 5. 关键设计决策
@@ -98,6 +110,17 @@ run_batch(date, force)
 | 基准买入持有 | `compute_benchmark`：以区间首日收盘全额买入逐日折算，与策略净值对比归因 alpha/beta（FR14） |
 | 回测无前视 | 复用 P0 的 `end_date` 取数，逐日只喂截至当日行情；回测不注入当下政策（FR14） |
 | 回测跳过政策版 | 回测无历史政策源，政策版退化为纯价格版；默认跳过避免重复曲线误导，仅 `--engine ai_policy` 显式回测（FR14） |
+| 双 bars 复权 | 真实盘拉原始价 + 本地 `compute_adjusted_bars` 生成复权价（分红缓存、零额外网络），特征用复权、估值/成交用原始（N-1） |
+| 特征注入 | `features.py` 纯函数算指标注入提示词，替代模型心算；只依赖最近 N 根，无前视（FR15） |
+| 置信度 + Rank IC | AI 输出 confidence；门槛过滤；回测/真实盘对实际成交 buy 回填后续收益算 Spearman IC（FR17/18） |
+| 市场环境注入 | 可选市场温度行，A/B 后默认开（更稳）（FR19） |
+| 历史盈亏反馈 | 可选近 N 笔已平仓交易注入，只含实际成交、无前视（FR20） |
+| 止损/止盈 | `apply_stop_rules` 强制卖出（[stop_loss]/[take_profit] 标签）；网格无有效组合默认关（FR21） |
+| 现金生息 | 空仓现金按 `cash_interest_rate/252` 逐日计息，`last_interest_date` 幂等，快照记 interest（FR22） |
+| catch-up 补跑 | `--catch-up` 从最近快照次日补齐缺失交易日，幂等；部署启动项已接线（FR23） |
+| 告警通知 | `notify.py` 跨全部引擎判定失败/无成交/回撤，webhook 推送失败不阻塞（FR24） |
+| 数据时点硬校验 | bars[-1]==决策日 才允许交易/估值，陈旧剔除 + 告警，杜绝旧价假当日（NFR8） |
+| 政策 15:30 截断 | 只取决策日 15:30 前政策，防收盘后消息 justify 收盘成交（NFR9） |
 
 ## 6. 错误处理与降级
 
