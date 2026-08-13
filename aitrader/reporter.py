@@ -6,6 +6,37 @@ from pathlib import Path
 from .config import Settings
 from .database import Database
 
+# 公平对比起点（v0.21）：AI 引擎提前一个交易日建仓，吃到起步涨幅。
+# 曲线/对比口径从该日起归一，剔除"起步阶段涨幅"造成的口径差异；
+# 账户若在该日尚无快照，则退回到其首个快照日。显式配置，避免依赖
+# bar_date 迁移残留这种隐式信号（否则起点会随数据状态悄悄漂移）。
+FAIR_START_DATE = "2026-08-10"
+
+
+def _fair_snapshots(snaps: list[dict]) -> list[dict]:
+    """公平对比口径的快照序列：>= FAIR_START_DATE 且 bar_date 非空；
+    不满足时退回到首个 bar_date 非空的快照（保持与 v0.21 曲线行为兼容）。"""
+    valued = [s for s in snaps if s.get("bar_date")]
+    fair = [s for s in valued if s["date"] >= FAIR_START_DATE]
+    return fair or valued
+
+
+def _true_pnl(last: dict, initial_capital: float) -> tuple[float, float]:
+    """真实累计盈亏（相对初始资金）：(金额, 百分比)。"""
+    amt = last["pnl"]
+    return amt, (amt / initial_capital * 100 if initial_capital else 0.0)
+
+
+def _fair_pnl(snaps: list[dict]) -> tuple[float, float, str | None]:
+    """公平对比口径盈亏（自 FAIR_START_DATE 或首个真实估值日）：(金额, 百分比, 起始日期)。
+    快照不足 2 个时金额为 0、百分比为 0、起始日期为 None。"""
+    fair = _fair_snapshots(snaps)
+    if len(fair) >= 2 and fair[0]["total_assets"] > 0:
+        base = fair[0]["total_assets"]
+        amt = fair[-1]["total_assets"] - base
+        return amt, amt / base * 100, fair[0]["date"]
+    return 0.0, 0.0, None
+
 
 def plot_compare(db: Database, settings: Settings, out_path: Path) -> Path:
     """绘制各账户资金曲线对比图，返回输出路径"""
@@ -24,16 +55,16 @@ def plot_compare(db: Database, settings: Settings, out_path: Path) -> Path:
     start_dates: set[str] = set()
     for acc in db.get_accounts():
         snaps = db.get_snapshots(acc["id"])
-        # 公平对比：只取有真实行情估值（bar_date 非空）的快照，
-        # 以首个真实估值日为基准归一，映射回初始资金，
+        # 公平对比：从 FAIR_START_DATE（或首个真实估值日）起，
+        # 以该日起点为基准归一，映射回初始资金，
         # 从而剔除提前建仓账户在起步阶段吃到的涨幅
-        snaps = [s for s in snaps if s.get("bar_date")]
-        if not snaps:
+        fair = _fair_snapshots(snaps)
+        if not fair:
             continue
-        start_dates.add(snaps[0]["date"])
-        base = snaps[0]["total_assets"]
-        dates = [datetime.strptime(s["date"], "%Y-%m-%d") for s in snaps]
-        assets = [s["total_assets"] / base * acc["initial_capital"] for s in snaps]
+        start_dates.add(fair[0]["date"])
+        base = fair[0]["total_assets"]
+        dates = [datetime.strptime(s["date"], "%Y-%m-%d") for s in fair]
+        assets = [s["total_assets"] / base * acc["initial_capital"] for s in fair]
         all_dates.extend(dates)
         ax.plot(
             dates, assets, marker="o", ms=3,
@@ -70,19 +101,18 @@ def build_summary(db: Database, settings: Settings) -> str:
             lines.append(f"[{acc['name']}] 暂无数据")
             continue
         last = snaps[-1]
-        # 统一对比口径：自首个真实估值日（bar_date 非空）起、起点归一
-        fair = [s for s in snaps if s.get("bar_date")]
-        if len(fair) >= 2:
-            base = fair[0]["total_assets"]
-            amt = fair[-1]["total_assets"] - base
-            pct = amt / base * 100
-        else:
-            amt = last["pnl"]
-            pct = last["pnl"] / acc["initial_capital"] * 100
+        # 主口径：真实累计盈亏（相对初始资金）；副口径：公平对比（自 FAIR_START_DATE 归一）
+        t_amt, t_pct = _true_pnl(last, acc["initial_capital"])
+        f_amt, f_pct, f_date = _fair_pnl(snaps)
+        fair_note = (
+            f" | 对比(自{f_date}归一) {f_amt:+,.2f} / {f_pct:+.2f}%"
+            if f_date else ""
+        )
         trades = db.get_trades(acc["id"])
         lines.append(
             f"[{acc['name']}] 总资产 {last['total_assets']:,.2f} "
-            f"({amt:+,.2f} / {pct:+.2f}%) | 现金 {last['cash']:,.2f} | 累计成交 {len(trades)} 笔"
+            f"(累计盈亏 {t_amt:+,.2f} / {t_pct:+.2f}%){fair_note}"
+            f" | 现金 {last['cash']:,.2f} | 累计成交 {len(trades)} 笔"
         )
     return "\n".join(lines)
 
@@ -105,18 +135,13 @@ def build_daily_report(
         if not snaps:
             continue
         last = snaps[-1]
-        # 统一对比口径：自首个真实估值日（bar_date 非空）起、起点归一，
-        # 与对比曲线同口径，避免提前建仓账户把起步涨幅算进收益造成假象
-        fair = [s for s in snaps if s.get("bar_date")]
-        if len(fair) >= 2:
-            disp_base = fair[0]["total_assets"]
-            disp_amt = fair[-1]["total_assets"] - disp_base
-            disp_date = fair[0]["date"]
-        else:
-            disp_base = acc["initial_capital"]
-            disp_amt = last["pnl"]
-            disp_date = None
-        pct = disp_amt / disp_base * 100
+        # 主口径：真实累计盈亏（相对初始资金）；副口径：公平对比（自 FAIR_START_DATE 归一）
+        t_amt, t_pct = _true_pnl(last, acc["initial_capital"])
+        f_amt, f_pct, f_date = _fair_pnl(snaps)
+        fair_line = (
+            f"<p>对比口径（自 {f_date} 起点归一）：{f_amt:+,.2f} 元（{f_pct:+.2f}%）</p>"
+            if f_date else ""
+        )
         state = db.load_state(acc["id"])
         if state and state.positions:
             parts = [
@@ -127,7 +152,7 @@ def build_daily_report(
         else:
             holdings = "空仓"
         trades = db.get_trades(acc["id"])
-        css = "green" if disp_amt >= 0 else "red"
+        css = "green" if t_amt >= 0 else "red"
         interest_total = sum(s.get("interest") or 0.0 for s in snaps)
 
         # B-1：真实盘 Rank IC 校准（AI 引擎信心是否有预测力）
@@ -211,9 +236,10 @@ def build_daily_report(
         cards.append(
             f"""<div class="card {css}">
             <h2>{acc['name']}（{acc['engine_type']}）</h2>
-            <p class="big">盈亏（自 {disp_date or '建仓'} 起点归一）<b>{disp_amt:+,.2f} 元</b>（{pct:+.2f}%）</p>
+            <p class="big">累计盈亏 <b>{t_amt:+,.2f} 元</b>（{t_pct:+.2f}%）</p>
             <p>总资产 {last['total_assets']:,.2f} 元 ｜ 现金 {last['cash']:,.2f} 元 {bar_note}</p>
             <p>持仓：{holdings}</p>
+            {fair_line}
             <p>累计成交 {len(trades)} 笔 ｜ 货基利息累计 {interest_total:+,.2f} 元</p>
             {dec_line}
             {ic_line}
