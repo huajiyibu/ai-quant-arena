@@ -21,12 +21,19 @@ def plot_compare(db: Database, settings: Settings, out_path: Path) -> Path:
 
     fig, ax = plt.subplots(figsize=(12, 6))
     all_dates: list[datetime] = []
+    start_dates: set[str] = set()
     for acc in db.get_accounts():
         snaps = db.get_snapshots(acc["id"])
+        # 公平对比：只取有真实行情估值（bar_date 非空）的快照，
+        # 以首个真实估值日为基准归一，映射回初始资金，
+        # 从而剔除提前建仓账户在起步阶段吃到的涨幅
+        snaps = [s for s in snaps if s.get("bar_date")]
         if not snaps:
             continue
+        start_dates.add(snaps[0]["date"])
+        base = snaps[0]["total_assets"]
         dates = [datetime.strptime(s["date"], "%Y-%m-%d") for s in snaps]
-        assets = [s["total_assets"] for s in snaps]
+        assets = [s["total_assets"] / base * acc["initial_capital"] for s in snaps]
         all_dates.extend(dates)
         ax.plot(
             dates, assets, marker="o", ms=3,
@@ -34,8 +41,9 @@ def plot_compare(db: Database, settings: Settings, out_path: Path) -> Path:
         )
         ax.axhline(acc["initial_capital"], color="gray", ls="--", lw=0.8)
 
-    ax.set_title("多引擎资金曲线对比")
-    ax.set_ylabel("总资产")
+    start_note = "、".join(sorted(start_dates)) or "—"
+    ax.set_title(f"多引擎资金曲线对比（起点归一至 {start_note}）")
+    ax.set_ylabel("归一化总资产（起点=初始资金）")
     ax.legend()
     ax.grid(alpha=0.3)
 
@@ -90,6 +98,16 @@ def build_daily_report(
             continue
         last = snaps[-1]
         pct = last["pnl"] / acc["initial_capital"] * 100
+        # 公平对比口径：自首个真实估值日（bar_date 非空）起，起点归一后的区间收益
+        fair = [s for s in snaps if s.get("bar_date")]
+        fair_line = ""
+        if len(fair) >= 2:
+            fbase = fair[0]["total_assets"]
+            f_amt = fair[-1]["total_assets"] - fbase
+            fair_line = (
+                f"<p>对比口径（自 {fair[0]['date']} 起点归一）："
+                f"{f_amt:+,.2f} 元（{f_amt / fbase * 100:+.2f}%）</p>"
+            )
         state = db.load_state(acc["id"])
         if state and state.positions:
             parts = [
@@ -187,6 +205,7 @@ def build_daily_report(
             <p class="big">累计盈亏 <b>{last['pnl']:+,.2f} 元</b>（{pct:+.2f}%）</p>
             <p>总资产 {last['total_assets']:,.2f} 元 ｜ 现金 {last['cash']:,.2f} 元 {bar_note}</p>
             <p>持仓：{holdings}</p>
+            {fair_line}
             <p>累计成交 {len(trades)} 笔 ｜ 货基利息累计 {interest_total:+,.2f} 元</p>
             {dec_line}
             {ic_line}
