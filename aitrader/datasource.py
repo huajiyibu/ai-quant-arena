@@ -286,9 +286,16 @@ class AkSharePolicySource:
             return []
 
         # F-6/F-7：按决策日 + 决策时点过滤（接口自带 发布日期/发布时间 两列）
+        # 注意：发布日期列是 datetime.date 对象，需先转字符串再比较（date == str 永远 False）
         if {"发布日期", "发布时间"}.issubset(df.columns):
             if decision_date is not None:
-                df = df[df["发布日期"] == decision_date]
+                # decision_date 可能是 str 或 datetime.date，统一转 "YYYY-MM-DD"
+                dd = (
+                    decision_date.strftime("%Y-%m-%d")
+                    if hasattr(decision_date, "strftime")
+                    else str(decision_date)
+                )
+                df = df[df["发布日期"].astype(str).str[:10] == dd]
             df = df[df["发布时间"].astype(str).str[:5] <= cutoff_time]
         if df.empty:
             return []
