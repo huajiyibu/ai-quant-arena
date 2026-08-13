@@ -140,9 +140,17 @@ class Database:
         self.db_path = str(db_path)
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._mem_conn: sqlite3.Connection | None = None
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
+        # P1-9: :memory: 复用单连接（否则每次新连接 schema 丢失，save_bars 报 no such table）
+        if self.db_path == ":memory:":
+            if self._mem_conn is None:
+                self._mem_conn = sqlite3.connect(":memory:")
+                self._mem_conn.row_factory = sqlite3.Row
+                self._mem_conn.execute("PRAGMA foreign_keys = ON")
+            return self._mem_conn
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -171,6 +179,15 @@ class Database:
             a_cols = {r[1] for r in conn.execute("PRAGMA table_info(account_states)").fetchall()}
             if "last_interest_date" not in a_cols:
                 conn.execute("ALTER TABLE account_states ADD COLUMN last_interest_date TEXT")
+            # P0-1: trades 唯一约束（先清理重复保留最早，再建唯一索引，防 --force/崩溃重跑重复成交）
+            conn.execute(
+                "DELETE FROM trades WHERE id NOT IN "
+                "(SELECT MIN(id) FROM trades GROUP BY account_id, date, symbol, action)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_unique "
+                "ON trades(account_id, date, symbol, action)"
+            )
 
     # ---- accounts ----
     def create_account(self, name: str, engine_type: EngineType, initial_capital: float) -> int:
@@ -247,7 +264,7 @@ class Database:
     def add_trade(self, account_id: int, trade: Trade) -> None:
         with self._connect() as conn:
             conn.execute(
-                """INSERT INTO trades(account_id, date, symbol, name, action, price, volume, amount, reason, created_at)
+                """INSERT OR IGNORE INTO trades(account_id, date, symbol, name, action, price, volume, amount, reason, created_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (
                     account_id,
