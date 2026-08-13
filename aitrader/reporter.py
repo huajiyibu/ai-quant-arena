@@ -70,11 +70,19 @@ def build_summary(db: Database, settings: Settings) -> str:
             lines.append(f"[{acc['name']}] 暂无数据")
             continue
         last = snaps[-1]
-        pct = last["pnl"] / acc["initial_capital"] * 100
+        # 统一对比口径：自首个真实估值日（bar_date 非空）起、起点归一
+        fair = [s for s in snaps if s.get("bar_date")]
+        if len(fair) >= 2:
+            base = fair[0]["total_assets"]
+            amt = fair[-1]["total_assets"] - base
+            pct = amt / base * 100
+        else:
+            amt = last["pnl"]
+            pct = last["pnl"] / acc["initial_capital"] * 100
         trades = db.get_trades(acc["id"])
         lines.append(
             f"[{acc['name']}] 总资产 {last['total_assets']:,.2f} "
-            f"({last['pnl']:+,.2f} / {pct:+.2f}%) | 现金 {last['cash']:,.2f} | 累计成交 {len(trades)} 笔"
+            f"({amt:+,.2f} / {pct:+.2f}%) | 现金 {last['cash']:,.2f} | 累计成交 {len(trades)} 笔"
         )
     return "\n".join(lines)
 
@@ -97,17 +105,18 @@ def build_daily_report(
         if not snaps:
             continue
         last = snaps[-1]
-        pct = last["pnl"] / acc["initial_capital"] * 100
-        # 公平对比口径：自首个真实估值日（bar_date 非空）起，起点归一后的区间收益
+        # 统一对比口径：自首个真实估值日（bar_date 非空）起、起点归一，
+        # 与对比曲线同口径，避免提前建仓账户把起步涨幅算进收益造成假象
         fair = [s for s in snaps if s.get("bar_date")]
-        fair_line = ""
         if len(fair) >= 2:
-            fbase = fair[0]["total_assets"]
-            f_amt = fair[-1]["total_assets"] - fbase
-            fair_line = (
-                f"<p>对比口径（自 {fair[0]['date']} 起点归一）："
-                f"{f_amt:+,.2f} 元（{f_amt / fbase * 100:+.2f}%）</p>"
-            )
+            disp_base = fair[0]["total_assets"]
+            disp_amt = fair[-1]["total_assets"] - disp_base
+            disp_date = fair[0]["date"]
+        else:
+            disp_base = acc["initial_capital"]
+            disp_amt = last["pnl"]
+            disp_date = None
+        pct = disp_amt / disp_base * 100
         state = db.load_state(acc["id"])
         if state and state.positions:
             parts = [
@@ -118,7 +127,7 @@ def build_daily_report(
         else:
             holdings = "空仓"
         trades = db.get_trades(acc["id"])
-        css = "green" if last["pnl"] >= 0 else "red"
+        css = "green" if disp_amt >= 0 else "red"
         interest_total = sum(s.get("interest") or 0.0 for s in snaps)
 
         # B-1：真实盘 Rank IC 校准（AI 引擎信心是否有预测力）
@@ -202,10 +211,9 @@ def build_daily_report(
         cards.append(
             f"""<div class="card {css}">
             <h2>{acc['name']}（{acc['engine_type']}）</h2>
-            <p class="big">累计盈亏 <b>{last['pnl']:+,.2f} 元</b>（{pct:+.2f}%）</p>
+            <p class="big">盈亏（自 {disp_date or '建仓'} 起点归一）<b>{disp_amt:+,.2f} 元</b>（{pct:+.2f}%）</p>
             <p>总资产 {last['total_assets']:,.2f} 元 ｜ 现金 {last['cash']:,.2f} 元 {bar_note}</p>
             <p>持仓：{holdings}</p>
-            {fair_line}
             <p>累计成交 {len(trades)} 笔 ｜ 货基利息累计 {interest_total:+,.2f} 元</p>
             {dec_line}
             {ic_line}
