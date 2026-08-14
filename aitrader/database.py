@@ -90,6 +90,20 @@ CREATE TABLE IF NOT EXISTS batch_runs (
     created_at TEXT NOT NULL,
     PRIMARY KEY(account_id, date)
 );
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at       TEXT NOT NULL,
+    engine_type  TEXT,
+    start_date   TEXT,
+    end_date     TEXT,
+    config_json  TEXT,
+    metrics_json TEXT,
+    bench_json   TEXT,
+    rank_ic      REAL,
+    api_calls    INTEGER DEFAULT 0,
+    cache_hits   INTEGER DEFAULT 0,
+    created_at   TEXT NOT NULL
+);
 """
 
 
@@ -490,5 +504,42 @@ class Database:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM bars WHERE symbol=? ORDER BY date DESC LIMIT ?", (symbol, limit)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---- backtest_runs（体检P1-1：回测台账，可追溯/可对比） ----
+    def add_backtest_run(
+        self,
+        run_at: str,
+        engine_type: str | None,
+        start_date: str,
+        end_date: str,
+        config_json: str,
+        metrics_json: str,
+        bench_json: str,
+        rank_ic: float | None,
+        api_calls: int,
+        cache_hits: int,
+    ) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO backtest_runs(run_at, engine_type, start_date, end_date,
+                     config_json, metrics_json, bench_json, rank_ic, api_calls, cache_hits, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    run_at, engine_type, start_date, end_date, config_json, metrics_json,
+                    bench_json, rank_ic, api_calls, cache_hits,
+                    datetime.now().strftime(_DT_FMT),
+                ),
+            )
+            return cur.lastrowid
+
+    def list_backtest_runs(self, limit: int = 20) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, run_at, engine_type, start_date, end_date, metrics_json, "
+                "bench_json, rank_ic, api_calls, cache_hits "
+                "FROM backtest_runs ORDER BY id DESC LIMIT ?",
+                (limit,),
             ).fetchall()
         return [dict(r) for r in rows]

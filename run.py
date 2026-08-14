@@ -369,6 +369,67 @@ def run_backtest(args, settings) -> int:
         bench_ret = benchmark[-1]["assets"] / settings.initial_capital - 1
         print(f"  基准({bench_symbol} 买入持有): {bench_ret:+.2%}")
 
+    # 体检P1-1：回测 run ledger 落库（可追溯、可 --list-runs 对比）
+    try:
+        api_calls = sum(getattr(e, "api_calls", 0) for e in engines.values())
+        cache_hits = sum(getattr(e, "cache_hits", 0) for e in engines.values())
+        for et, r in results.items():
+            m = r.get("metrics")
+            if m is None:
+                continue
+            metrics_json = json.dumps(
+                {
+                    "total_return": getattr(m, "total_return", None),
+                    "annual_return": getattr(m, "annual_return", None),
+                    "max_drawdown": getattr(m, "max_drawdown", None),
+                    "sharpe": getattr(m, "sharpe", None),
+                    "win_rate": getattr(m, "win_rate", None),
+                    "profit_factor": getattr(m, "profit_factor", None),
+                    "turnover": getattr(m, "turnover", None),
+                    "trade_count": getattr(m, "trade_count", 0),
+                },
+                ensure_ascii=False,
+            )
+            ric = r.get("rank_ic") or {}
+            bench_json = json.dumps(
+                {
+                    "symbol": bench_symbol,
+                    "start": bench_bars[0].datetime.date().isoformat() if bench_bars else None,
+                    "end": bench_bars[-1].datetime.date().isoformat() if bench_bars else None,
+                    "ret": (benchmark[-1]["assets"] / settings.initial_capital - 1) if benchmark else None,
+                },
+                ensure_ascii=False,
+            )
+            db.add_backtest_run(
+                run_at=datetime.now().isoformat(timespec="seconds"),
+                engine_type=et,
+                start_date=start.date().isoformat(),
+                end_date=end.date().isoformat(),
+                config_json=json.dumps(
+                    {
+                        "fill_mode": settings.fill_mode,
+                        "adjust": args.adjust or settings.adjust,
+                        "feature_inject": settings.feature_inject,
+                        "market_env_inject": settings.market_env_inject,
+                        "feedback_n": settings.feedback_n,
+                        "temperature": settings.temperature,
+                        "model": settings.model,
+                        "commission_rate": settings.risk.commission_rate,
+                        "slippage_bps": settings.risk.slippage_bps,
+                        "stop_loss_pct": settings.risk.stop_loss_pct,
+                    },
+                    ensure_ascii=False,
+                ),
+                metrics_json=metrics_json,
+                bench_json=bench_json,
+                rank_ic=ric.get("ic"),
+                api_calls=api_calls,
+                cache_hits=cache_hits,
+            )
+        print(f"[run-ledger] 已落库 {len(results)} 条回测记录，可用 --list-runs 查看")
+    except Exception as exc:
+        print(f"[run-ledger] 落库失败（不影响回测结果）: {type(exc).__name__}: {exc}")
+
     # 报表（只渲染本轮引擎账户，避免混入历史残留曲线误导对比）
     engine_types = set(results.keys())
     chart = plot_backtest_curves(db, settings, benchmark, BACKTEST_CHART_PATH, engine_types=engine_types)
@@ -461,6 +522,11 @@ def main(argv: list[str] | None = None) -> int:
         "--health",
         action="store_true",
         help="健康自检（key/交易日历/bars新鲜度/账户快照/last_run），有问题返回非0退出码（P1-2）",
+    )
+    parser.add_argument(
+        "--list-runs",
+        action="store_true",
+        help="列出最近回测台账（run ledger，P1-1）后退出",
     )
     parser.add_argument(
         "--adjust",
@@ -641,6 +707,21 @@ def _run(args) -> int:
     # 体检P1-2：--health 自检
     if getattr(args, "health", False):
         return run_health(settings, db)
+
+    # 体检P1-1：--list-runs 回测台账（查回测库 backtest.db）
+    if getattr(args, "list_runs", False):
+        bt_path = Path(args.db) if args.db else ROOT / "data" / "backtest.db"
+        bdb = Database(bt_path)
+        runs = bdb.list_backtest_runs(20)
+        if not runs:
+            print("回测台账为空（尚未跑过 --backtest 或未落库）")
+        for r in runs:
+            print(
+                f"#{r['id']} {r['run_at']} {r['engine_type'] or '-'} "
+                f"{r['start_date']}~{r['end_date']} ic={r['rank_ic']} "
+                f"calls={r['api_calls']}"
+            )
+        return 0
 
     # 只出报表
     if args.report_only:
