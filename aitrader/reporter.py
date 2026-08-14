@@ -322,12 +322,13 @@ def build_daily_report(
   .foot {{ color: #95a5a6; font-size: 12px; margin-top: 20px; }}
 </style></head><body>
 <h1>📊 AI 交易日报</h1>
+<p style="background:#fff3cd;border:1px solid #e67e22;color:#8a4b08;padding:10px 14px;border-radius:8px;font-size:14px;font-weight:bold">⚠️ 模拟≠实盘：本报告为虚拟资金仿真，按收盘价成交、默认低滑点；实盘还面临滑点/流动性/情绪等差异，模拟结果不可外推，请勿据此实盘操作。</p>
 <p>生成时间：{datetime.now():%Y-%m-%d %H:%M} ｜ 数据截至：{data_disp}{data_note}</p>
 {bench_line}
 {cards_html}
 <h2>多引擎资金曲线对比</h2>
 <img src="data:image/png;base64,{img_b64}" alt="资金曲线"/>
-<p class="foot">本报告为仿真（虚拟资金）结果，仅供学习体验，不构成投资建议。</p>
+<p class="foot">本报告为仿真（虚拟资金）结果，仅供学习体验，不构成投资建议。AI 输出（买卖理由/政策解读）仅为算法模拟，非专业投资建议；小样本下结论仅供过程观察，不具统计意义。</p>
 </body></html>"""
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
