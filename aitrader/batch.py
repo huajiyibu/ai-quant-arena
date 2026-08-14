@@ -242,6 +242,32 @@ class BatchRunner:
                 adjusted[sym] = bars
         return adjusted
 
+    def _apply_dividend_cash(self, state: AccountState, date: datetime) -> AccountState:
+        """体检P0-2：除权日按持仓贷记分红现金（复用 fetch_dividends 进程内缓存，
+        仅当日单份分红 → 无前视）。分红现金再参与后续货基计息。失败跳过不中断。"""
+        from dataclasses import replace
+        from datetime import timedelta
+
+        from .adjfactor import cumulative_dividend_at, fetch_dividends
+
+        for sym, pos in (state.positions or {}).items():
+            cfg = self.settings.symbols[sym]
+            prefix = "sh" if cfg.exchange.upper() == "SH" else "sz"
+            try:
+                divs = fetch_dividends(f"{prefix}{sym}")
+                cum_today = cumulative_dividend_at(divs, date.date())
+                cum_prev = cumulative_dividend_at(divs, date.date() - timedelta(days=1))
+                per_share = round(cum_today - cum_prev, 6)
+                if per_share > 0:
+                    amount = round(per_share * pos.volume, 2)
+                    state = replace(state, cash=round(state.cash + amount, 2))
+                    logger.info(
+                        "除权日分红入账 %s %d股×%.4f=%.2f", sym, pos.volume, per_share, amount
+                    )
+            except Exception as exc:
+                logger.warning("分红入账失败 %s（跳过，不中断）: %s", sym, exc)
+        return state
+
     def _run_engine(
         self,
         engine_type: str,
@@ -287,6 +313,8 @@ class BatchRunner:
             if bars
         }
         state = refresh_prices(state, prices)
+        # 体检P0-2：除权日分红现金入账（复用分红缓存，仅当日分红，无前视；分红现金再参与计息）
+        state = self._apply_dividend_cash(state, date)
         # 现金生息（P0-1 幂等）：仅当日未计息过才计，防 --force/崩溃重跑双计息
         interest_today = 0.0
         last_int = self.db.get_last_interest_date(account_id)
