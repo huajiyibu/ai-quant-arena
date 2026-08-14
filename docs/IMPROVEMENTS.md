@@ -274,3 +274,32 @@
 - **P0-1** trades 加 `UNIQUE(account_id,date,symbol,action)` 索引（迁移先清理重复保留最早）+ `add_trade` 改 `INSERT OR IGNORE` → `--force`/崩溃重跑同日同标的同向不再重复成交（幂等）；新增 `tests/test_v20.py` 3 条（重复幂等 / 内存库 / 迁移去重）。
 - **P1-9** `Database(':memory:')` 改为复用单连接（`_mem_conn` 惰性创建），schema 建在该连接上不再丢失，`save_bars` 不再报 `no such table`。
 - **P0-4（完整事务原子化）** 未做完整事务，但 INSERT OR IGNORE + 唯一约束 + N-2（无快照可重跑）已使崩溃重跑的成交幂等；save_state 写了快照没写的半成品由重跑覆盖。完整 `transaction()` 包裹留作后续加固。测试 190 全过。
+
+
+### v0.23/v0.24 体检修复落地记录（2026-08-14，主 agent + 12 方向体检）
+
+> 2026-08-13 全量重置后，用户让 12 个方向 Agent 对系统彻头彻尾体检（`tests/20260813/`，去重后 7 P0 / 10 P1），随后分批落地。测试 197 全过。
+
+**v0.23（2026-08-13~14）**：
+- `--help` 崩溃修复（help 字符串裸 `%`→`%%`）
+- decisions 加 `UNIQUE(account_id,date,symbol,action)` + `INSERT OR IGNORE`（防 --force/崩溃重跑重复决策留痕污染 IC/归因）
+- `reset_account` 补清 `batch_runs`
+- 计息 marker 后移到 save_state 之后（防"标记先写、状态未写"漏计窗口）
+- 政策注入质量：海外邻国噪音过滤 + 标题空/NaN 跳过 + 去重 + 每条限长 150
+- reason 标签契约修复（JSON 示例带标签 → `[政策]` 标签可统计）
+- confidence 全 action 存储（原只 buy）
+- 日报样本不足水印（<20 笔仅过程展示）+ ai_policy 政策注入自检（无政策段标"不可信"）
+- 日报基准改用本地 bars 表 + 扣单边佣金 + 失败可见（P1-10 落地）
+- notify 失败留档 `data/notify_fail.log`
+- install_task.ps1 计划任务接 `--catch-up 5`（**注意：实际部署需重跑脚本**）
+- 文档同步（README/SRS → v0.23/197 测试、删假 --health）
+
+**v0.24（2026-08-14）**：
+- **P0-2 口径漂移（部分落地）**：config risk 块补全 slippage_bps=10 / stop_loss / take_profit / min_confidence（真实盘风控可生效）+ 批处理真实盘也应用 CLI 风控参数 + `--print-config`（A-2）+ 真实盘除权日分红现金入账（复用分红缓存，仅当日无前视）
+- **P1-1 run ledger 落地**：`backtest_runs` 表 + run_backtest 落库（config/metrics/bench/ic/api_calls）+ `--list-runs`（查 backtest.db）
+- **P1-2 `--health` 落地**：key / 交易日历（触发加载）/ bars 新鲜度 / 账户快照 / last_run，非 0 退出码，before_close 守卫不误报
+- 代理故障直连降级：retry_call 首次 ProxyError → 国内行情域名 NO_PROXY 白名单（不影响 DeepSeek API）
+- AI 卖出纪律：prompt JSON 示例给 sell 对称例子 + 明确"不要只买不卖"
+- 合规红线：SRS 删除"真钱半自动建议接口 / 1000 元真钱预算"，明确永不接入真实资金；日报头部加"模拟≠实盘"警示条 + 页脚教育
+
+**仍未修（下一批）**：完整事务原子化（`transaction()`，幂等已兜住核心风险）、单一数据源腾讯 fallback（代理降级已缓解）、run.py/reporter 拆分、回测 `adjust=none` 基线（hfq vs 原始价严格统一）、交易日历本地缓存、政策归档、API 成本累计、idle 告警精度、回测 end 日历守卫。
