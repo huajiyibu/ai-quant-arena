@@ -1,17 +1,33 @@
-"""通用工具：网络调用重试（指数退避）。
-
-用于行情 / 政策 / AI 等偶发网络失败的可重试调用，降低"空仓日 / 数据缺失"累积。
+"""v0.24e 第五批：代理故障直连降级（体检03 P2-10，08-13 实锤代理拒绝全天剔除）。
+retry_call 首次捕获 ProxyError → 对国内行情域名设置 NO_PROXY 白名单直连重试（不影响 DeepSeek API）。
 """
-from __future__ import annotations
+from pathlib import Path
 
-import logging
-import time
-from typing import Any, Callable
+p = Path("aitrader/util.py")
+src = p.read_text(encoding="utf-8")
 
-logger = logging.getLogger(__name__)
-
-
-# 体检P2-10：国内行情域名 NO_PROXY 白名单（代理故障时降级直连；DeepSeek API 不受影响）
+old = '''def retry_call(
+    fn: Callable[[], Any],
+    retries: int = 3,
+    base_delay: float = 1.0,
+    label: str = "调用",
+) -> Any:
+    """执行 fn，失败重试 retries 次（指数退避 1s/2s/4s）；全部失败抛最后一次异常。"""
+    delay = base_delay
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("%s失败（%d/%d）: %s", label, attempt + 1, retries, exc)
+            if attempt < retries - 1:
+                time.sleep(delay)
+                delay *= 2
+    assert last_exc is not None
+    raise last_exc
+'''
+new = '''# 体检P2-10：国内行情域名 NO_PROXY 白名单（代理故障时降级直连；DeepSeek API 不受影响）
 _PROXY_NO_PROXY = ".sina.com.cn,.sinajs.cn,.gtimg.cn,.eastmoney.com,.10jqka.com.cn"
 
 
@@ -54,3 +70,9 @@ def retry_call(
                 delay *= 2
     assert last_exc is not None
     raise last_exc
+'''
+n = src.count(old)
+assert n == 1, f"util: expected 1, got {n}"
+src = src.replace(old, new)
+p.write_text(src, encoding="utf-8")
+print("util.py: 代理故障直连降级 done")
