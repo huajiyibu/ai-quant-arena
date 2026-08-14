@@ -295,7 +295,7 @@ class BatchRunner:
             daily_rate = self.settings.cash_interest_rate / 252
             interest_today = round(state.cash * daily_rate, 2)
             state = apply_cash_interest(state, daily_rate)
-            self.db.set_last_interest_date(account_id, today_str)
+            # 计息 marker 后移到 save_state 之后（防"marker 已写但状态未入账"的漏计窗口）
 
         # 决策（异常降级）
         policy_text = self._policy_text if getattr(engine, "include_policy", False) else ""
@@ -349,6 +349,9 @@ class BatchRunner:
             default=date.date(),
         )
         self.db.save_state(account_id, new_state)
+        # P0-1：计息标记与状态同点落库（漏计窗口修复：marker 不再早于状态提交）
+        if last_int is None or last_int < today_str:
+            self.db.set_last_interest_date(account_id, today_str)
         source = "real" if date.date() == datetime.now().date() else "replay"
         self.db.add_snapshot(
             account_id,

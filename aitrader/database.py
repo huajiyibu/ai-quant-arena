@@ -188,6 +188,15 @@ class Database:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_unique "
                 "ON trades(account_id, date, symbol, action)"
             )
+            # 体检P0: decisions 唯一约束（防 --force/崩溃重跑重复决策留痕，污染 Rank IC/归因）
+            conn.execute(
+                "DELETE FROM decisions WHERE id NOT IN "
+                "(SELECT MIN(id) FROM decisions GROUP BY account_id, date, symbol, action)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_unique "
+                "ON decisions(account_id, date, symbol, action)"
+            )
 
     # ---- accounts ----
     def create_account(self, name: str, engine_type: EngineType, initial_capital: float) -> int:
@@ -299,7 +308,7 @@ class Database:
     ) -> None:
         with self._connect() as conn:
             conn.execute(
-                """INSERT INTO decisions(account_id, date, engine_type, symbol, action, amount, confidence, reason,
+                """INSERT OR IGNORE INTO decisions(account_id, date, engine_type, symbol, action, amount, confidence, reason,
                                          fallback, validation, prompt_json, raw_output_json, created_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
@@ -395,6 +404,7 @@ class Database:
             conn.execute("DELETE FROM trades WHERE account_id=?", (account_id,))
             conn.execute("DELETE FROM decisions WHERE account_id=?", (account_id,))
             conn.execute("DELETE FROM daily_snapshots WHERE account_id=?", (account_id,))
+            conn.execute("DELETE FROM batch_runs WHERE account_id=?", (account_id,))
         self.save_state(
             account_id, AccountState(initial_capital=initial, cash=initial)
         )

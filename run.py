@@ -444,13 +444,13 @@ def main(argv: list[str] | None = None) -> int:
         "--stop-loss",
         type=float,
         default=None,
-        help="止损阈值（0~0.5，如 0.08=跌8%强制卖出；默认0关，PP-5）",
+        help="止损阈值（0~0.5，如 0.08=跌8%%强制卖出；默认0关，PP-5）",
     )
     parser.add_argument(
         "--take-profit",
         type=float,
         default=None,
-        help="止盈阈值（0~1.0，如 0.2=涨20%强制卖出；默认0关，PP-5）",
+        help="止盈阈值（0~1.0，如 0.2=涨20%%强制卖出；默认0关，PP-5）",
     )
     parser.add_argument(
         "--adjust",

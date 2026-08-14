@@ -82,9 +82,10 @@ def test_report_data_until_stale_warning(tmp_path, monkeypatch):
 def test_get_uncalibrated_buys_excludes_rejected(tmp_path):
     db = Database(tmp_path / "t.db")
     acc = db.create_account("t", "ai", 100_000)
-    for _ in range(2):
+    # 两笔不同标的 buy（decisions 唯一约束按 account/date/symbol/action，避免冲突）
+    for sym in ("510300", "588000"):
         db.add_decision(
-            acc, D, "ai", Decision("510300", "buy", amount=1000, confidence=0.7)
+            acc, D, "ai", Decision(sym, "buy", amount=1000, confidence=0.7)
         )
     # 把其中一笔标为被风控拒绝
     with db._connect() as conn:

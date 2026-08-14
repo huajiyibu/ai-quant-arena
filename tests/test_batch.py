@@ -185,11 +185,11 @@ def test_same_day_run_is_idempotent(tmp_path):
 
 
 def test_force_reruns_same_day(tmp_path):
-    """--force：跳过幂等检查，同日可重跑（决策会再次落库）"""
+    """--force：跳过幂等检查，同日可重跑；决策留痕幂等（唯一约束+INSERT OR IGNORE，不重复留痕）"""
     runner, db = _make_always_buy_runner(tmp_path)
     runner.run(D)
     runner.run(D, force=True)
     acc = db.get_account_by_engine("ai")
-    # 第二次 force 重新决策（决策 2 条）；但已持仓，买入被风控拒绝（成交仍 1 笔）
-    assert len(db.get_decisions(acc["id"])) == 2
+    # 第二次 force 重新决策但留痕幂等（decisions 唯一约束）；已持仓，买入被风控拒绝（成交仍 1 笔）
+    assert len(db.get_decisions(acc["id"])) == 1
     assert len(db.get_trades(acc["id"])) == 1
