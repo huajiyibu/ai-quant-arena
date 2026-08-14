@@ -458,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
         help="打印最终生效配置（脱敏，不输出 api_key）后退出（A-2）",
     )
     parser.add_argument(
+        "--health",
+        action="store_true",
+        help="健康自检（key/交易日历/bars新鲜度/账户快照/last_run），有问题返回非0退出码（P1-2）",
+    )
+    parser.add_argument(
         "--adjust",
         choices=["none", "hfq"],
         default=None,
@@ -528,6 +533,79 @@ def print_config(settings) -> None:
     print(f"api_key={'已配置' if s.api_key else '未配置'}（脱敏，不输出原文）")
 
 
+def run_health(settings, db) -> int:
+    """体检P1-2：--health 健康自检。返回 0=健康，非0=存在问题。"""
+    import json
+
+    problems: list[str] = []
+    notes: list[str] = []
+
+    if not settings.api_key:
+        problems.append("DeepSeek API key 未配置（请检查 .env）")
+
+    # 交易日历（先触发加载：calendar_ok 是加载后的状态标记，不自动加载）
+    try:
+        from aitrader.datasource import _load_trade_calendar
+
+        ds = AkShareDataSource()
+        _load_trade_calendar()
+        ok = ds.calendar_ok
+        notes.append(f"交易日历: {'可用' if ok else '不可用（降级为仅跳周末）'}")
+        if not ok:
+            problems.append("交易日历不可用（缓存缺失/加载失败，批处理会保守跳过）")
+    except Exception as exc:
+        problems.append(f"数据源初始化失败: {type(exc).__name__}: {exc}")
+
+    # bars 新鲜度
+    syms = list(settings.symbols)
+    if syms:
+        try:
+            bars = db.get_bars(syms[0], limit=3)
+            if bars:
+                notes.append(f"bars({syms[0]}) 最新日期: {bars[0]['date']}")
+            else:
+                problems.append("bars 表无数据（行情尚未拉取）")
+        except Exception as exc:
+            problems.append(f"bars 查询失败: {exc}")
+
+    # 各账户快照
+    for acc in db.get_accounts():
+        snaps = db.get_snapshots(acc["id"])
+        if snaps:
+            notes.append(f"{acc['name']}: 最近快照 {snaps[-1]['date']}")
+        else:
+            notes.append(f"{acc['name']}: 无快照（新账本/未运行）")
+
+    # last_run 新鲜度
+    lr = ROOT / "data" / "last_run.json"
+    try:
+        if lr.exists():
+            data = json.loads(lr.read_text(encoding="utf-8"))
+            ok = data.get("ok", False)
+            error = data.get("error", "")
+            notes.append(f"最近运行: ok={ok}（{data.get('date', '')}）")
+            if not ok and error == "before_close":
+                notes.append("（今日尚未到 15:30，收盘守卫拦截早间运行，属正常；待定时任务）")
+            elif not ok:
+                problems.append("最近一次运行失败（last_run.ok=false）")
+        else:
+            problems.append("last_run.json 不存在（从未运行过？）")
+    except Exception:
+        pass
+
+    print("== AI Quant Arena 健康检查 ==")
+    for n in notes:
+        print("  [信息]", n)
+    if problems:
+        print("== 发现的问题 ==")
+        for pr in problems:
+            print("  [问题]", pr)
+        print("健康检查：未通过 ❌")
+        return 1
+    print("健康检查：通过 ✓")
+    return 0
+
+
 def _run(args) -> int:
     """批处理 / 回测 / 报表 的实际执行（main 已持有单实例锁）"""
     settings = load_settings()
@@ -559,6 +637,10 @@ def _run(args) -> int:
         return code
 
     db = Database(settings.db_path)
+
+    # 体检P1-2：--health 自检
+    if getattr(args, "health", False):
+        return run_health(settings, db)
 
     # 只出报表
     if args.report_only:
