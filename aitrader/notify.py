@@ -41,12 +41,27 @@ def check_alerts(
 
 
 def send_notify(text: str, webhook_url: str) -> bool:
-    """向 webhook 推送告警；任何失败仅记日志并返回 False（不阻塞主流程）。
+    """向 webhook 推送告警；失败记录原因到本地并返回 False（不阻塞主流程）。
 
     Server酱风格（GET /title/desp）与通用 POST JSON 都尝试。
     """
     if not webhook_url:
         return False
+
+    def _log_fail(reason: str) -> None:
+        # 体检P1-1：失败留档本地，无人值守下 webhook 挂掉也不静默
+        try:
+            from datetime import datetime
+            from pathlib import Path
+
+            fail_log = Path("data/notify_fail.log")
+            fail_log.parent.mkdir(parents=True, exist_ok=True)
+            with fail_log.open("a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {reason} | {text[:120]}\n")
+        except Exception:
+            pass
+        logger.warning("通知推送失败（不阻塞主流程）: %s", reason)
+
     try:
         import requests
 
@@ -59,8 +74,9 @@ def send_notify(text: str, webhook_url: str) -> bool:
             )
             if r.ok:
                 return True
-        except Exception:
-            pass
+            _log_fail(f"POST 非200(status={r.status_code})")
+        except Exception as exc:
+            _log_fail(f"POST 异常: {type(exc).__name__}: {exc}")
         # 2) Server酱 GET（title/desp query）
         try:
             r = requests.get(
@@ -70,8 +86,9 @@ def send_notify(text: str, webhook_url: str) -> bool:
             )
             if r.ok:
                 return True
-        except Exception:
-            pass
+            _log_fail(f"GET 非200(status={r.status_code})")
+        except Exception as exc:
+            _log_fail(f"GET 异常: {type(exc).__name__}: {exc}")
         return False
     except Exception:
         logger.exception("通知推送失败（不阻塞主流程）")

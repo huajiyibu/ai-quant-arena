@@ -17,7 +17,7 @@ if (-not (Test-Path $script)) {
 }
 
 # 1) 每天 15:30 定时任务（若已存在则覆盖）
-schtasks /Create /TN $taskName /TR '"C:\veighna_studio\pythonw.exe" "D:\下载的堆砌\vnpy-4.4.0\ai_demo\ai_trader\run.py"' /SC DAILY /ST 15:30 /F
+schtasks /Create /TN $taskName /TR '"C:\veighna_studio\pythonw.exe" "D:\下载的堆砌\vnpy-4.4.0\ai_demo\ai_trader\run.py" --catch-up 5' /SC DAILY /ST 15:30 /F
 
 # 2) 登录时启动项（开机自动补跑）
 $startup = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
