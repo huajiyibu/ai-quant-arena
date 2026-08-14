@@ -301,13 +301,27 @@ class AkSharePolicySource:
             return []
 
         items: list[str] = []
+        seen: set[str] = set()
+        # 体检：过滤海外邻国政策噪音（澳/印/日/韩等非 A 股政策，易被宽松关键词误命中）
+        FOREIGN = ("澳大利亚", "印度", "日本", "韩国", "越南", "泰国", "马来西亚", "印尼", "新加坡")
+        DOMESTIC = ("中国", "央行", "证监会", "国务院", "发改委", "国常会", "人民币", "上证", "深证", "沪深", "A股", "国内")
         # 接口内部按发布时间升序 → 倒序遍历取最新匹配优先
         for row in df.iloc[::-1].itertuples():
-            title = str(row.标题)
-            content = str(row.内容)
+            title = str(row.标题).strip()
+            content = str(row.内容).strip()
+            if not title or title == "nan":
+                continue  # 标题为空/NaN 跳过（避免裸"｜内容"残文）
             text = f"{title}｜{content}"
-            if any(kw in title or kw in content for kw in keywords):
-                items.append(text)
+            if not any(kw in title or kw in content for kw in keywords):
+                continue
+            # 海外邻国噪音：含外国名且不含国内词 → 跳过
+            if any(f in text for f in FOREIGN) and not any(d in text for d in DOMESTIC):
+                continue
+            key = text[:80]
+            if key in seen:
+                continue  # 去重（财联社标题/内容常重复）
+            seen.add(key)
+            items.append(text[:150])  # 限长，避免长文挤占 prompt
             if len(items) >= max_items:
                 break
         return items

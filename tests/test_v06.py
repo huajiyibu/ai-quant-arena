@@ -118,7 +118,8 @@ def test_high_confidence_passes_threshold():
 
 
 # ---------- 落库 ----------
-def test_confidence_persisted_for_buy_only(tmp_path):
+def test_confidence_persisted_for_all_actions(tmp_path):
+    """体检P1-2：hold/sell 也存置信度（扩大校准样本，成本≈0）"""
     db = Database(tmp_path / "t.db")
     account_id = db.create_account("t", "ai", 100_000)
     db.add_decision(
@@ -128,7 +129,7 @@ def test_confidence_persisted_for_buy_only(tmp_path):
     rows = db.get_decisions(account_id)
     by_action = {r["action"]: r for r in rows}
     assert by_action["buy"]["confidence"] == pytest.approx(0.8)
-    assert by_action["sell"]["confidence"] is None  # sell 不存置信度
+    assert by_action["sell"]["confidence"] == pytest.approx(0.9)  # 不再丢弃 sell/hold 的置信度
 
 
 # ---------- Rank IC ----------

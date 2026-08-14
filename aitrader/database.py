@@ -318,7 +318,7 @@ class Database:
                     decision.symbol,
                     decision.action,
                     decision.amount,
-                    decision.confidence if decision.action == "buy" else None,
+                    decision.confidence,
                     decision.reason,
                     1 if decision.fallback else 0,
                     decision.validation or None,
