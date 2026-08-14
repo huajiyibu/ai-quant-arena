@@ -9,7 +9,7 @@
 - **三引擎对比**：规则（双均线）vs AI·纯价格 vs AI·价格+政策，独立账本、同源数据、可对比
 - **零风险仿真**：虚拟资金，风控写死（单笔 ≤ 30% 总资产、单日买入 ≤ 50%）
 - **全量留痕**：每个决策保存"输入行情 + AI 原始输出"，任何一笔交易可回溯
-- **可测试**：核心逻辑为纯函数，28 个 pytest 用例覆盖
+- **可测试**：核心逻辑为纯函数，197 个 pytest 用例覆盖
 - **工程化**：pydantic 配置、`.env` 密钥、结构化日志、SQLite 持久化、matplotlib 报表
 - **自动运行**：一行脚本注册 Windows 定时任务
 
@@ -81,7 +81,7 @@ python run.py --date 2026-08-06   # 指定交易日（回放，只取截至该�
 python run.py --force             # 该日已处理过也强制重跑（计息/成交均幂等，不重复）
 python run.py --report-only       # 只出报表（不重新交易）
 python run.py --catch-up [N]      # 补跑缺失交易日（最近快照次日→昨天，最多 N 个交易日，默认 5；幂等）
-python run.py --health            # （规划中）自检网络/日历/key/数据新鲜度
+# 排障：scripts\check_daily.py 查快照/决策/持仓留痕；data\last_run.json 看最近运行；data\logs\app.log 看日志
 ```
 
 **回测与实验参数**（`--backtest` 时生效）：
@@ -93,7 +93,7 @@ python run.py --backtest --engine ai --start 2025-06-01 --end 2026-08-01 \
 ```
 
 - `--fill close|next_open` 成交假设；`--commission-mult` 佣金倍率；`--temperature` / `--model` 采样
-- `--feature-inject` 特征注入；`--adjust hfq` 复权；`--market-env` 市场环境（默认开，用 `--market-env` 仅回测对照）
+- `--feature-inject` 特征注入；`--adjust hfq` 复权；`--market-env` 市场环境注入（真实盘默认由 config.json 控制；回测用此参数开启对照）
 - `--feedback N` 历史盈亏反馈笔数；`--stop-loss` / `--take-profit` 止损止盈；`--slippage` 滑点 bps
 - `--min-confidence` 买入置信度门槛；`--record-decisions` 回测落库决策；`--benchmark` 指定基准代码
 
